@@ -99,6 +99,7 @@ export default class  extends AdminForthPlugin {
     pathToComponentToRenderState?: string
   ) {
 
+    //create a record for the job in the database with status in progress
     const objectToSave = {
       [this.options.nameField]: jobName,
       [this.options.startedByField]: adminUser.pk,
@@ -113,9 +114,19 @@ export default class  extends AdminForthPlugin {
       createdRecord = creationResult.createdRecord;
     } else {
       throw new Error(`Failed to create a record for the job. Error: ${creationResult.error}`);
-    }
-
+    }    
     const jobId = createdRecord[this.getResourcePk()];
+    
+    this.adminforth.websocket.publish('/background-jobs', { 
+      jobId, 
+      status: 'IN_PROGRESS', 
+      name: jobName,
+      progress: 0,
+      createdAt: createdRecord[this.options.createdAtField],
+    });
+
+
+    //create a level db instance for the job with name as jobId
     const jobLevelDb = new Level(`${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`, { valueEncoding: 'json' });
 
 
@@ -151,6 +162,7 @@ export default class  extends AdminForthPlugin {
         await this.adminforth.resource(this.getResourceId()).update(jobId, {
           [this.options.progressField]: progress,
         })
+        this.adminforth.websocket.publish('/background-jobs', { jobId, progress });
       }
     }
 
@@ -164,6 +176,7 @@ export default class  extends AdminForthPlugin {
     await this.adminforth.resource(this.getResourceId()).update(jobId, {
       [this.options.statusField]: 'DONE',
     })
+    this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE' });
 
   }
 

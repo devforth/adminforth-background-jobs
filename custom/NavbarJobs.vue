@@ -4,7 +4,7 @@
       <div class="loader "></div>
       <div class="absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"> {{ jobsCount }}</div>
     </div>
-    <div class="flex items-center justify-center" v-else-if="jobsCount > 0">
+    <div class="flex items-center justify-center" v-else-if="jobs.length > 0">
       <Tooltip>
         <IconCheckCircleOutline class="w-8 h-8 text-green-500" />
         <template #tooltip>
@@ -24,13 +24,14 @@
 
 <script setup lang="ts">
   import type { AdminUser } from 'adminforth';
-  import { onMounted, ref, computed } from 'vue';
+  import { onMounted, onUnmounted, ref, computed } from 'vue';
   import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
   import { Tooltip } from '@/afcl';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
   import type { IJob } from './utils';
   import { callAdminForthApi } from '@/utils';
+  import websocket from '@/websocket';
 
   const { t } = useI18n();
 
@@ -49,10 +50,33 @@
   })
 
   const jobsCount = computed(() => {
-    return jobs.value.length;
+    return jobs.value.filter(job => job.status === 'IN_PROGRESS').length;
   })
 
+
+
   onMounted(async () => {
+    websocket.subscribe('/background-jobs', (data) => {
+      const jobIndex = jobs.value.findIndex(job => job.id === data.jobId);
+      if (jobIndex !== -1) {
+        if (data.status) {
+          jobs.value[jobIndex].status = data.status;
+        }
+        if (data.progress !== undefined) {
+          jobs.value[jobIndex].progress = data.progress;
+        }
+      } else {
+        jobs.value.push({
+          id: data.jobId,
+          name: data.name || 'Unknown Job',
+          status: data.status || 'IN_PROGRESS',
+          progress: data.progress || 0,
+          createdAt: data.createdAt || new Date().toISOString(),
+        });
+      }
+    });
+
+
     try {
       const res = await callAdminForthApi({
         path: `/plugin/${props.meta.pluginInstanceId}/get-list-of-jobs`,
@@ -62,6 +86,11 @@
     } catch (error) {
       console.error('Error fetching jobs:', error);
     }
+  });
+
+
+  onUnmounted(() => {
+    websocket.unsubscribe('/background-jobs');
   });
 
 </script>
