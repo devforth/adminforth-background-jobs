@@ -4,7 +4,10 @@ import type { PluginOptions } from './types.js';
 import { afLogger } from "adminforth";
 import pLimit from 'p-limit';
 import { Level } from 'level';
+import { resolve } from "node:dns";
+import { set } from "@vueuse/core";
 
+type JobStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
 type getStateFieldParams = () => any;
 
@@ -51,8 +54,8 @@ export default class  extends AdminForthPlugin {
   }
 
   private async createLevelDbTaskRecord(levelDb: Level, taskId: string, initialState: Record<string, any>) {
-    //create record in level db with task id as key and initial state as value and status IN_PROGRESS
-    await levelDb.put(taskId, JSON.stringify({ state: initialState, status: 'IN_PROGRESS' }));
+    //create record in level db with task id as key and initial state as value and status SCHEDULED
+    await levelDb.put(taskId, JSON.stringify({ state: initialState, status: 'SCHEDULED' }));
   }
 
   private async setLevelDbTaskStateField(levelDb: Level, taskId: string, state: Record<string, any>) {
@@ -62,7 +65,7 @@ export default class  extends AdminForthPlugin {
     await levelDb.put(taskId, JSON.stringify({ state, status }));
   }
 
-  private async setLevelDbTaskStatusField(levelDb: Level, taskId: string, status: string) {
+  private async setLevelDbTaskStatusField(levelDb: Level, taskId: string, status: JobStatus) {
     const state = await this.getLevelDbTaskStateField(levelDb, taskId);
     await levelDb.del(taskId);
     await levelDb.put(taskId, JSON.stringify({ state, status }));
@@ -78,7 +81,7 @@ export default class  extends AdminForthPlugin {
     return Promise.resolve(null);
   }
 
-  private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<Record<string, any>> {
+  private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<JobStatus> {
     const state = await levelDb.get(taskId);
     if (state) {
       const parsedState = JSON.parse(state);
@@ -125,17 +128,21 @@ export default class  extends AdminForthPlugin {
       createdAt: createdRecord[this.options.createdAtField],
     });
 
-
     //create a level db instance for the job with name as jobId
     const jobLevelDb = new Level(`${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`, { valueEncoding: 'json' });
+
+    const limit2 = pLimit(parrallelLimit);
+    const createTaskRecordsPromises = tasks.map((task, index) => {
+      return limit2(() => this.createLevelDbTaskRecord(jobLevelDb, index.toString(), task.state));
+    });
+
+    await Promise.all(createTaskRecordsPromises);
 
 
     const totalTasks = tasks.length;
     let completedTasks = 0;
 
     const taskHandler = async ( taskIndex: number, taskState ) => {
-      // create a level db record for the task with status in progress
-      await this.createLevelDbTaskRecord(jobLevelDb, taskIndex.toString(), taskState);
 
       //define the setTaskStateField and getTaskStateField functions to pass to the task
       const setTaskStateField = async (state: Record<string, any>) => {
@@ -145,12 +152,14 @@ export default class  extends AdminForthPlugin {
         return await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString());
       }
 
+      await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'IN_PROGRESS');
+
       //handling the task 
       try {
         await handleTask({ setTaskStateField, getTaskStateField });
 
         //Set task status to completed in level db
-        await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'COMPLETED');
+        await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'DONE');
       } catch (error) {
         afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${error}`, );
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'FAILED');
@@ -177,22 +186,48 @@ export default class  extends AdminForthPlugin {
       [this.options.statusField]: 'DONE',
     })
     this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE' });
+  }
+
+  private async runProcessingUnfinishedTasks(
+    tasks: {state: Record<string, any>}[],
+    parrallelLimit: number,
+    handleTask: ( { setTaskStateField, getTaskStateField }: { setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>,
+  ) {
 
   }
 
   public async setJobField(jobId: string, key: string, value: any) {
-
+    const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+    const state = jobRecord[this.options.stateField];
+    const parsedState = JSON.parse(state);
+    parsedState[key] = value;
+    await this.adminforth.resource(this.getResourceId()).update(jobId, {
+      [this.options.stateField]: JSON.stringify(parsedState),
+    });
   }
 
   public async getJobField(jobId: string, key: string) {
-    
+    const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+    const state = jobRecord[this.options.stateField];
+    const parsedState = JSON.parse(state);
+    return parsedState[key];
   }
 
   public async getJobState(jobId: string) {
-
+    const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+    const state = jobRecord[this.options.stateField];
+    return JSON.parse(state);
   }
+
+  private async processAllUnfinishedJobs() {
+    const resourceId = this.getResourceId();
+    const unprocessedJobs = await this.adminforth.resource(resourceId).list(Filters.EQ(this.options.statusField, 'IN_PROGRESS'));
+
+    console.log('Unprocessed jobs found on startup:', unprocessedJobs);
+  }
+
   
-  validateConfigAfterDiscover(adminforth: IAdminForth, resourceConfig: AdminForthResource) {
+  async validateConfigAfterDiscover(adminforth: IAdminForth, resourceConfig: AdminForthResource) {
     // optional method where you can safely check field types after database discovery was performed
     this.checkIfFieldInResource(resourceConfig, this.options.createdAtField, 'createdAtField');
     this.checkIfFieldInResource(resourceConfig, this.options.startedByField, 'startedByField');
@@ -200,6 +235,11 @@ export default class  extends AdminForthPlugin {
     this.checkIfFieldInResource(resourceConfig, this.options.progressField, 'progressField');
     this.checkIfFieldInResource(resourceConfig, this.options.statusField, 'statusField');
     this.checkIfFieldInResource(resourceConfig, this.options.nameField, 'nameField');
+
+
+    //Add temp delay to make sure, that all resources active. Probably should be fixed
+    // await new Promise(resolve => setTimeout(resolve, 1000));
+    // this.processAllUnfinishedJobs();
   }
 
   instanceUniqueRepresentation(pluginOptions: any) : string {
