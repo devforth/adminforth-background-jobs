@@ -1,20 +1,22 @@
 <template>
-  <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
-    <div v-if="isAlLeastOneJobRunning" class="relative">
-      <div class="loader "></div>
-      <div class="absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"> {{ jobsCount }}</div>
+  <div ref="dropdownRef">
+    <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
+      <div v-if="isAlLeastOneJobRunning" class="relative">
+        <div class="loader "></div>
+        <div class="absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"> {{ jobsCount }}</div>
+      </div>
+      <div class="flex items-center justify-center" v-else-if="jobs.length > 0">
+        <Tooltip>
+          <IconCheckCircleOutline class="w-8 h-8 text-green-500" />
+          <template #tooltip>
+            {{ t('All jobs completed') }}
+          </template>
+        </Tooltip>
+      </div>
     </div>
-    <div class="flex items-center justify-center" v-else-if="jobs.length > 0">
-      <Tooltip>
-        <IconCheckCircleOutline class="w-8 h-8 text-green-500" />
-        <template #tooltip>
-          {{ t('All jobs completed') }}
-        </template>
-      </Tooltip>
+    <div v-if="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10">
+      <JobsList :jobs="jobs" />
     </div>
-  </div>
-  <div v-if="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10">
-    <JobsList :jobs="jobs" />
   </div>
 
   
@@ -32,6 +34,7 @@
   import type { IJob } from './utils';
   import { callAdminForthApi } from '@/utils';
   import websocket from '@/websocket';
+  import { onClickOutside } from '@vueuse/core'
 
   const { t } = useI18n();
 
@@ -44,6 +47,11 @@
 
   const isDropdownOpen = ref(false);
   const jobs = ref<IJob[]>([]);
+  const dropdownRef = ref<HTMLElement | null>(null);
+
+  onClickOutside(dropdownRef, () => {
+    isDropdownOpen.value = false;
+  });
 
   const isAlLeastOneJobRunning = computed(() => {
     return jobs.value.some(job => job.status === 'IN_PROGRESS');
