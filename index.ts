@@ -145,7 +145,6 @@ export default class  extends AdminForthPlugin {
     jobName: string,
     adminUser: AdminUser,
     tasks: taskType[],
-    initialFields: Record<string, any> = {},
     jobHandlerName: string,
   ) {
 
@@ -159,7 +158,6 @@ export default class  extends AdminForthPlugin {
     const objectToSave = {
       [this.options.nameField]: jobName,
       [this.options.startedByField]: adminUser.pk,
-      [this.options.stateField]: JSON.stringify(initialFields),
       [this.options.progressField]: 0,
       [this.options.statusField]: 'IN_PROGRESS',
       [this.options.jobHandlerField]: jobHandlerName,
