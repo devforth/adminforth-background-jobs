@@ -1,6 +1,11 @@
 <template>
   <div class="w-1vw md:w-64 bg-white border border-gray-200 rounded-md">
-    <Modal v-for="job in props.jobs" :key="job.id" :beforeOpenFunction="props.closeDropdown">
+    <Modal 
+      v-for="job in props.jobs" :key="job.id" 
+      :beforeCloseFunction="onBeforeOpen" 
+      :beforeOpenFunction="onBeforeClose"
+      removeFromDomOnClose
+    >
       <template #trigger>
         <div class="flex items-center w-full px-4 py-3 border-b border-gray-200 hover:bg-gray-50 transition-colors">
           <div class="flex flex-col w-full max-w-48">
@@ -22,12 +27,10 @@
           <StateToIcon :job="job" />
         </div>
       </template>
-      <div>
-        <JobInfoPopup 
-          :job="job" 
-          :meta="meta"
-        />
-      </div>
+      <JobInfoPopup
+        :job="job" 
+        :meta="meta"
+      />
     </Modal>
 
   </div>
@@ -40,6 +43,7 @@ import { getTimeAgoString } from '@/utils';
 import { ProgressBar, Modal } from '@/afcl';
 import JobInfoPopup from './JobInfoPopup.vue';
 import StateToIcon from './StateToIcon.vue';
+import { ref } from 'vue';
 
 const props = defineProps<{
   jobs: IJob[];
@@ -48,6 +52,17 @@ const props = defineProps<{
     pluginInstanceId: string;
   };
 }>();
+
+
+const isModalOpen = ref(false);
+
+function onBeforeOpen() {
+  props.closeDropdown();
+}
+
+function onBeforeClose() {
+  isModalOpen.value = false;
+}
 
   
 </script>

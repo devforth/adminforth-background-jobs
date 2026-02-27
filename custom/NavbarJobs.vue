@@ -41,7 +41,7 @@
   import type { AdminUser } from 'adminforth';
   import { onMounted, onUnmounted, ref, computed } from 'vue';
   import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
-  import { Tooltip, Modal } from '@/afcl';
+  import { Tooltip } from '@/afcl';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
   import type { IJob } from './utils';

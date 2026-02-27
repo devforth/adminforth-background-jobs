@@ -4,6 +4,7 @@ import type { PluginOptions } from './types.js';
 import { afLogger } from "adminforth";
 import pLimit from 'p-limit';
 import { Level } from 'level';
+import fs from 'fs/promises';
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
@@ -48,6 +49,35 @@ export default class  extends AdminForthPlugin {
         pluginInstanceId: this.pluginInstanceId,
       }
     });
+
+    if (!this.resourceConfig.hooks) {
+      this.resourceConfig.hooks = {};
+    }
+    if (!this.resourceConfig.hooks.delete) {
+      this.resourceConfig.hooks.delete = {};
+    }
+    if (!this.resourceConfig.hooks.delete.beforeSave) {
+      this.resourceConfig.hooks.delete.beforeSave = [];
+    }
+    this.resourceConfig.hooks.delete.beforeSave.push(async ({record, recordId}: {record: any, recordId: any}) => {
+
+      const levelDbPath = `${this.options.levelDbPath || './background-jobs-dbs/'}job_${recordId}`;
+      const jobLevelDb = this.levelDbInstances[recordId];
+
+      //close level db instance if it's open and delete the level db folder for the job
+      if (jobLevelDb) {
+        await jobLevelDb.close();
+        delete this.levelDbInstances[recordId];
+      }
+
+      //delete level db folder for the job
+      await fs.rm(levelDbPath, {
+        recursive: true,
+        force: true,
+      });
+
+      return {ok: true};
+    })
   }
 
   private checkIfFieldInResource(resourceConfig: AdminForthResource, fieldName: string, fieldString?: string) {
@@ -198,6 +228,7 @@ export default class  extends AdminForthPlugin {
 
       //define the setTaskStateField and getTaskStateField functions to pass to the task
       const setTaskStateField = async (state: Record<string, any>) => {
+        this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, state });
         await this.setLevelDbTaskStateField(jobLevelDb, taskIndex.toString(), state);
       }
       const getTaskStateField = async () => {
@@ -242,11 +273,13 @@ export default class  extends AdminForthPlugin {
     if (lastJobStatus !== 'CANCELLED' && failedTasks === 0) {
       await this.adminforth.resource(this.getResourceId()).update(jobId, {
         [this.options.statusField]: 'DONE',
+        [this.options.finishedAtField]: (new Date()).toISOString(),
       })
       this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE' });
     } else if (failedTasks > 0) {
       await this.adminforth.resource(this.getResourceId()).update(jobId, {
         [this.options.statusField]: 'DONE_WITH_ERRORS',
+        [this.options.finishedAtField]: (new Date()).toISOString(),
       })
       this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE_WITH_ERRORS' });
     }
@@ -349,11 +382,13 @@ export default class  extends AdminForthPlugin {
   async validateConfigAfterDiscover(adminforth: IAdminForth, resourceConfig: AdminForthResource) {
     // optional method where you can safely check field types after database discovery was performed
     this.checkIfFieldInResource(resourceConfig, this.options.createdAtField, 'createdAtField');
+    this.checkIfFieldInResource(resourceConfig, this.options.finishedAtField, 'finishedAtField');
     this.checkIfFieldInResource(resourceConfig, this.options.startedByField, 'startedByField');
     this.checkIfFieldInResource(resourceConfig, this.options.stateField, 'stateField');
     this.checkIfFieldInResource(resourceConfig, this.options.progressField, 'progressField');
     this.checkIfFieldInResource(resourceConfig, this.options.statusField, 'statusField');
     this.checkIfFieldInResource(resourceConfig, this.options.nameField, 'nameField');
+    this.checkIfFieldInResource(resourceConfig, this.options.jobHandlerField, 'jobHandlerField');
 
 
     //Add temp delay to make sure, that all resources active. Probably should be fixed
@@ -402,6 +437,7 @@ export default class  extends AdminForthPlugin {
         try {
           await this.adminforth.resource(this.getResourceId()).update(jobId, {
             [this.options.statusField]: 'CANCELLED',
+            [this.options.finishedAtField]: (new Date()).toISOString(),
           });
           this.adminforth.websocket.publish('/background-jobs', { 
             jobId, 
@@ -426,6 +462,7 @@ export default class  extends AdminForthPlugin {
         } else {
           try {
             jobLevelDb = new Level(levelDbPath, { valueEncoding: 'json' });
+            this.levelDbInstances[jobId] = jobLevelDb;
           } catch (error) {
             return { ok: false, message: `Failed to access tasks for job with id ${jobId}.` };
           }
