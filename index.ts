@@ -127,18 +127,18 @@ export default class  extends AdminForthPlugin {
     return Promise.resolve(null);
   }
   
-  public registerTaskHandler(
-    jobHandlerName: string, 
-    handler: taskHandlerType,
-    customComponent?: AdminForthComponentDeclarationFull,
-    parrallelLimit: number = 3,
-  ) {
+  public registerTaskHandler({ jobHandlerName, handler, parallelLimit = 3,
+  }:{jobHandlerName: string, handler: taskHandlerType, parallelLimit?: number}) {
     //register the handler in a map with jobHandlerName as key and handler as value
     this.taskHandlers[jobHandlerName] = handler;
-    this.jobParallelLimits[jobHandlerName] = parrallelLimit;
-    if (customComponent) {
-      this.jobCustomComponents[jobHandlerName] = customComponent;
-    }
+    this.jobParallelLimits[jobHandlerName] = parallelLimit;
+  }
+
+  public registerTaskDetailsComponent({
+    jobHandlerName,
+    component,
+  }:{jobHandlerName: string, component: AdminForthComponentDeclarationFull}) {
+    this.jobCustomComponents[jobHandlerName] = component;
   }
 
   public async startNewJob(
