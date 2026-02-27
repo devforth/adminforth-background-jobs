@@ -15,7 +15,7 @@ type taskType = {
   state: Record<string, any>;
 }
 
-export default class  extends AdminForthPlugin {
+export default class BackgroundJobsPlugin extends AdminForthPlugin {
   options: PluginOptions;
   private taskHandlers: Record<string, taskHandlerType> = {};
   private jobCustomComponents: Record<string, AdminForthComponentDeclarationFull> = {};
@@ -39,7 +39,7 @@ export default class  extends AdminForthPlugin {
 
   async modifyResourceConfig(adminforth: IAdminForth, resourceConfig: AdminForthResource) {
     super.modifyResourceConfig(adminforth, resourceConfig);
-
+    console.log('Modifying resource config for Background Jobs Plugin');
     if (!adminforth.config.customization?.globalInjections?.header) {
       adminforth.config.customization.globalInjections.header = [];
     }
