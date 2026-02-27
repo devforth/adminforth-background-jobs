@@ -14,9 +14,21 @@
         </Tooltip>
       </div>
     </div>
-    <div v-if="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10">
-      <JobsList :jobs="jobs" />
-    </div>
+    <Transition
+      enter-active-class="transition ease-out duration-200"
+      enter-from-class="opacity-0 scale-95"
+      enter-to-class="opacity-100 scale-100"
+      leave-active-class="transition ease-in duration-150"
+      leave-from-class="opacity-100 scale-100"
+      leave-to-class="opacity-0 scale-95"
+    >
+      <div v-show="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10">
+        <JobsList 
+          :closeDropdown="() => isDropdownOpen = false"
+          :jobs="jobs" 
+        />
+      </div>
+    </Transition>
   </div>
 
   
@@ -28,7 +40,7 @@
   import type { AdminUser } from 'adminforth';
   import { onMounted, onUnmounted, ref, computed } from 'vue';
   import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
-  import { Tooltip } from '@/afcl';
+  import { Tooltip, Modal } from '@/afcl';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
   import type { IJob } from './utils';
