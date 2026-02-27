@@ -1,9 +1,9 @@
 <template> 
     <div class="flex flex-col w-full min-w-96">
       <div class="flex items-center mb-1">
-        <h2 class="text-lg font-semibold">{{ job.name }}</h2>
-        <p class="ml-2 text-xs text-gray-600 h-full"> {{ getTimeAgoString(new Date(job.createdAt)) }}</p>
-        <p class="ml-auto text-gray-800 h-full"> {{  t('Progress:')  }} <span class="font-semibold" >{{ job.progress }}%</span></p>
+        <h2 class="text-lg font-semibold dark:text-white">{{ job.name }}</h2>
+        <p class="ml-2 text-xs text-gray-600 dark:text-gray-200 h-full"> {{ getTimeAgoString(new Date(job.createdAt)) }}</p>
+        <p class="ml-auto text-gray-800 dark:text-white h-full"> {{  t('Progress:')  }} <span class="font-semibold" >{{ job.progress }}%</span></p>
         <StateToIcon :job="job" />
       </div>
       <div class="flex items-center gap-4 w-full">

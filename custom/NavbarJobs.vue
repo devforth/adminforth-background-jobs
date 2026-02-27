@@ -1,17 +1,25 @@
 <template>
   <div ref="dropdownRef">
     <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
-      <div v-if="isAlLeastOneJobRunning" class="relative">
-        <div class="loader "></div>
-        <div class="absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"> {{ jobsCount }}</div>
-      </div>
-      <div class="flex items-center justify-center" v-else-if="jobs.length > 0">
+      <div class="relative flex items-center justify-center" v-if="jobs.length > 0">
         <Tooltip>
-          <IconCheckCircleOutline class="w-8 h-8 text-green-500" />
+          <IconBriefcaseSolid class="w-7 h-7 text-gray-600 hover:text-gray-700" />
           <template #tooltip>
             {{ t('All jobs completed') }}
           </template>
         </Tooltip>
+        <div
+          v-if="isAlLeastOneJobRunning" 
+          class="ping-animation absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
+        >
+          {{ jobsCount }}
+        </div>
+        <div 
+          v-if="isAlLeastOneJobRunning" 
+          class="absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
+        >
+          {{ jobsCount }}
+        </div>
       </div>
     </div>
     <Transition
@@ -40,7 +48,7 @@
 <script setup lang="ts">
   import type { AdminUser } from 'adminforth';
   import { onMounted, onUnmounted, ref, computed } from 'vue';
-  import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
+  import { IconCheckCircleOutline, IconBriefcaseSolid } from '@iconify-prerendered/vue-flowbite';
   import { Tooltip } from '@/afcl';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
@@ -119,36 +127,14 @@
 
 
 <style scoped lang="scss">
-  .loader {
-    width: 28px;
-    aspect-ratio: 1;
-    border-radius: 50%;
-    --spinner-color: #1a56db;
+.ping-animation {
+  animation: ping 1s cubic-bezier(0, 0, 1, 1) infinite;
+}
 
-    background:
-      conic-gradient(
-        from 120deg,
-        var(--spinner-color) 0deg 40deg,
-        transparent 40deg
-      ),
-
-      conic-gradient(#ccc 0deg 360deg);
-
-    -webkit-mask: radial-gradient(
-      farthest-side,
-      transparent calc(100% - 6px),
-      #000 calc(100% - 5px)
-    );
-    mask: radial-gradient(
-      farthest-side,
-      transparent calc(100% - 6px),
-      #000 calc(100% - 5px)
-    );
-
-    animation: stepRotate 2s infinite;
+@keyframes ping {
+  75%, 100% {
+    transform: scale(2);
+    opacity: 0;
   }
-
-  @keyframes stepRotate {
-    to { transform: rotate(1turn); }
-  }
+}
 </style>

@@ -1,5 +1,5 @@
 <template>
-  <div class="w-1vw md:w-64 bg-white border border-gray-200 rounded-md">
+  <div class="w-1vw md:w-64 bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 rounded-md">
     <Modal 
       v-for="job in props.jobs" :key="job.id" 
       :beforeCloseFunction="onBeforeOpen" 
@@ -7,11 +7,11 @@
       removeFromDomOnClose
     >
       <template #trigger>
-        <div class="flex items-center w-full px-4 py-3 border-b border-gray-200 hover:bg-gray-50 transition-colors">
+        <div class="flex items-center w-full px-4 py-3 bg-white dark:bg-gray-700 dark:border-gray-600 border-b border-gray-200 hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors">
           <div class="flex flex-col w-full max-w-48">
             <p class="flex gap-2 items-end justify-between text-nowrap">
-              <span class="text-sm h-full text truncate">{{ job.name }}</span> 
-              <span class="text-xs text-gray-600">{{ getTimeAgoString(new Date(job.createdAt)) }}</span> 
+              <span class="text-sm h-full text truncate dark:text-white">{{ job.name }}</span> 
+              <span class="text-xs dark:text-gray-200 text-gray-600">{{ getTimeAgoString(new Date(job.createdAt)) }}</span> 
             </p>
             <ProgressBar 
               class="mt-1"
