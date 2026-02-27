@@ -22,7 +22,7 @@
       leave-from-class="opacity-100 scale-100"
       leave-to-class="opacity-0 scale-95"
     >
-      <div v-show="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10">
+      <div v-show="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10 overflow-y-auto max-h-96 ">
         <JobsList 
           :closeDropdown="() => isDropdownOpen = false"
           :jobs="jobs" 
@@ -87,12 +87,13 @@
           jobs.value[jobIndex].progress = data.progress;
         }
       } else {
-        jobs.value.push({
+        jobs.value.unshift({
           id: data.jobId,
           name: data.name || 'Unknown Job',
           status: data.status || 'IN_PROGRESS',
           progress: data.progress || 0,
           createdAt: data.createdAt || new Date().toISOString(),
+          customComponent: data.customComponent,
         });
       }
     });

@@ -6,6 +6,7 @@ export interface PluginOptions {
   progressField: string;
   statusField: string;
   nameField?: string;
+  jobHandlerField?: string;
 
   /**
    * Path to the level db folder. If not provided, a default path is ./background-jobs-dbs/

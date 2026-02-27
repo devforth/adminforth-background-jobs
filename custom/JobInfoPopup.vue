@@ -21,7 +21,14 @@
         <Button class="h-8" v-if="job.status === 'IN_PROGRESS'" @click="cancelJob"> {{ t('Cancel') }} </Button>
       </div>
     </div>
-    <slot></slot>
+    {{  job.customComponent  }}
+    {{ getCustomComponent(job.customComponent) }}
+    <component 
+      v-if="job.customComponent"
+      class="mt-4" 
+      :is="getCustomComponent(job.customComponent)" 
+      :meta="job.customComponent"
+    />
   </div>
 </template>
 
@@ -30,10 +37,11 @@
 <script setup lang="ts">
 import type { IJob } from './utils';
 import { ProgressBar, Button } from '@/afcl';
-import { getTimeAgoString, callAdminForthApi} from '@/utils';
+import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils';
 import { useI18n } from 'vue-i18n';
 import StateToIcon from './StateToIcon.vue';
 import { useAdminforth } from '@/adminforth';
+import { get } from 'node:http';
 
 
 const { t } = useI18n();

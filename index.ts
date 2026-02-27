@@ -1,18 +1,24 @@
-import { AdminForthPlugin, Filters } from "adminforth";
-import type { IAdminForth, IHttpServer, AdminForthResourcePages, AdminForthResourceColumn, AdminForthDataTypes, AdminForthResource, AdminUser } from "adminforth";
+import { AdminForthPlugin, Filters, Sorts } from "adminforth";
+import type { IAdminForth, IHttpServer, AdminForthResourcePages, AdminForthResourceColumn, AdminForthDataTypes, AdminForthResource, AdminUser, AdminForthComponentDeclarationFull } from "adminforth";
 import type { PluginOptions } from './types.js';
 import { afLogger } from "adminforth";
 import pLimit from 'p-limit';
 import { Level } from 'level';
-import { resolve } from "node:dns";
-import { set } from "@vueuse/core";
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
 type getStateFieldParams = () => any;
+type taskHandlerType = ( { setTaskStateField, getTaskStateField }: { setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>;
+type taskType = {
+  skip?: boolean;
+  state: Record<string, any>;
+}
 
 export default class  extends AdminForthPlugin {
   options: PluginOptions;
+  private taskHandlers: Record<string, taskHandlerType> = {};
+  private jobCustomComponents: Record<string, AdminForthComponentDeclarationFull> = {};
+  private jobParallelLimits: Record<string, number> = {};
 
   constructor(options: PluginOptions) {
     super(options, import.meta.url);
@@ -90,18 +96,34 @@ export default class  extends AdminForthPlugin {
     return Promise.resolve(null);
   }
   
-
+  public registerTaskHandler(
+    jobHandlerName: string, 
+    handler: taskHandlerType,
+    customComponent?: AdminForthComponentDeclarationFull,
+    parrallelLimit: number = 3,
+  ) {
+    //register the handler in a map with jobHandlerName as key and handler as value
+    this.taskHandlers[jobHandlerName] = handler;
+    this.jobParallelLimits[jobHandlerName] = parrallelLimit;
+    if (customComponent) {
+      this.jobCustomComponents[jobHandlerName] = customComponent;
+    }
+  }
 
   public async startNewJob(
     jobName: string,
     adminUser: AdminUser,
-    tasks: {state: Record<string, any>}[],
-    parrallelLimit: number = 3,
+    tasks: taskType[],
     initialFields: Record<string, any> = {},
-    handleTask: ( { setTaskStateField, getTaskStateField }: { setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>,
-    pathToComponentToRenderState?: string
+    jobHandlerName: string,
   ) {
 
+    const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
+    if (!handleTask) {
+      throw new Error(`No handler registered for jobHandler ${jobHandlerName}. Please register a handler using the registerTaskHandler method before starting a job with this jobHandler.`);
+    }
+    const customComponent = this.jobCustomComponents[jobHandlerName];
+    const parrallelLimit = this.jobParallelLimits[jobHandlerName] || 3;
     //create a record for the job in the database with status in progress
     const objectToSave = {
       [this.options.nameField]: jobName,
@@ -109,6 +131,7 @@ export default class  extends AdminForthPlugin {
       [this.options.stateField]: JSON.stringify(initialFields),
       [this.options.progressField]: 0,
       [this.options.statusField]: 'IN_PROGRESS',
+      [this.options.jobHandlerField]: jobHandlerName,
     }
 
     const creationResult = await this.adminforth.resource(this.getResourceId()).create(objectToSave);
@@ -126,6 +149,7 @@ export default class  extends AdminForthPlugin {
       name: jobName,
       progress: 0,
       createdAt: createdRecord[this.options.createdAtField],
+      customComponent,
     });
 
     //create a level db instance for the job with name as jobId
@@ -138,18 +162,30 @@ export default class  extends AdminForthPlugin {
 
     await Promise.all(createTaskRecordsPromises);
 
+    this.runProcessingTasks(tasks, jobLevelDb, jobId, handleTask, parrallelLimit);
+  }
 
+  private async runProcessingTasks(
+    tasks: taskType[],
+    jobLevelDb: Level,
+    jobId: string,
+    handleTask: taskHandlerType,
+    parrallelLimit: number,
+  ) {
     const totalTasks = tasks.length;
     let completedTasks = 0;
     let failedTasks = 0;
     let lastJobStatus = 'IN_PROGRESS';
 
-    const taskHandler = async ( taskIndex: number, taskState ) => {
+    const taskHandler = async ( taskIndex: number, task ) => {
+      if (task.skip) {
+        completedTasks = await this.handleFinishTask(completedTasks, totalTasks, jobId, true);
+        return;
+      }
       if (lastJobStatus === 'CANCELLED') {
         afLogger.info(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
         return;
       }
-
       const currentJobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
       const currentJobStatus = currentJobRecord[this.options.statusField];
 
@@ -182,18 +218,13 @@ export default class  extends AdminForthPlugin {
         return;
       } finally {
         //Update progress
-        completedTasks++;
-        const progress = Math.round((completedTasks / totalTasks) * 100);
-        await this.adminforth.resource(this.getResourceId()).update(jobId, {
-          [this.options.progressField]: progress,
-        })
-        this.adminforth.websocket.publish('/background-jobs', { jobId, progress });
+        completedTasks = await this.handleFinishTask(completedTasks, totalTasks, jobId);
       }
     }
 
     const limit = pLimit(parrallelLimit);
     const tasksToExecute = tasks.map((task, taskIndex) => {
-      return limit(() => taskHandler(taskIndex, task.state));
+      return limit(() => taskHandler(taskIndex, task));
     });
 
     await Promise.all(tasksToExecute);
@@ -210,11 +241,55 @@ export default class  extends AdminForthPlugin {
     }
   }
 
+
+  private async handleFinishTask(completedTasks: number, totalTasks: number, jobId: string, wasTaskSkipped: boolean = false) {
+    completedTasks++;
+    if (wasTaskSkipped) {
+      return completedTasks;
+    }
+    const progress = Math.round((completedTasks / totalTasks) * 100);
+    await this.adminforth.resource(this.getResourceId()).update(jobId, {
+      [this.options.progressField]: progress,
+    })
+    this.adminforth.websocket.publish('/background-jobs', { jobId, progress });
+    return completedTasks;
+  }
   private async runProcessingUnfinishedTasks(
-    tasks: {state: Record<string, any>}[],
-    parrallelLimit: number,
-    handleTask: ( { setTaskStateField, getTaskStateField }: { setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>,
+    job: Record<string, any>
   ) {
+    const levelDbPath = `${this.options.levelDbPath || './background-jobs-dbs/'}job_${job[this.getResourcePk()]}`;
+    const jobLevelDb = new Level(levelDbPath, { valueEncoding: 'json' });
+    const jobHandlerName = job[this.options.jobHandlerField];
+    const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
+    if (!handleTask) {
+      afLogger.error(`No handler registered for jobHandler ${jobHandlerName}. Cannot process unfinished tasks for job ${job[this.getResourcePk()]}.`);
+      return;
+    }
+    const parrallelLimit = this.jobParallelLimits[jobHandlerName] || 3;
+    
+    const unfinishedTasks: taskType[] = [];
+    let taskIndex = 0;
+    while (true) {
+      const taskData = await jobLevelDb.get(taskIndex.toString());
+      if (!taskData) {   
+        break;
+      }
+      let parsedTaskData: { state: Record<string, any>, status: TaskStatus };
+      try {
+        parsedTaskData = JSON.parse(taskData);
+      } catch (error) {
+        afLogger.error(`Error parsing task data for task ${taskIndex} of job ${job[this.getResourcePk()]}: ${error}`);
+        taskIndex++;
+        continue;
+      }
+      if (parsedTaskData.status === 'IN_PROGRESS' || parsedTaskData.status === 'SCHEDULED') {
+        unfinishedTasks.push({ state: parsedTaskData.state });
+      } else {
+        unfinishedTasks.push({ state: parsedTaskData.state, skip: true });
+      }
+      taskIndex++;
+    }
+    await this.runProcessingTasks(unfinishedTasks, jobLevelDb, job[this.getResourcePk()], handleTask, parrallelLimit);
 
   }
 
@@ -244,8 +319,11 @@ export default class  extends AdminForthPlugin {
   private async processAllUnfinishedJobs() {
     const resourceId = this.getResourceId();
     const unprocessedJobs = await this.adminforth.resource(resourceId).list(Filters.EQ(this.options.statusField, 'IN_PROGRESS'));
-
-    console.log('Unprocessed jobs found on startup:', unprocessedJobs);
+    for (const job of unprocessedJobs) {
+      const jobName = job[this.options.nameField];
+      afLogger.info(`Processing unfinished job with name ${jobName} on startup.`);
+      this.runProcessingUnfinishedTasks(job);
+    }
   }
 
   
@@ -260,8 +338,8 @@ export default class  extends AdminForthPlugin {
 
 
     //Add temp delay to make sure, that all resources active. Probably should be fixed
-    // await new Promise(resolve => setTimeout(resolve, 1000));
-    // this.processAllUnfinishedJobs();
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    this.processAllUnfinishedJobs();
   }
 
   instanceUniqueRepresentation(pluginOptions: any) : string {
@@ -276,7 +354,7 @@ export default class  extends AdminForthPlugin {
         const user = adminUser;
         const startedByField = this.options.startedByField;
         const resourcePk = this.getResourcePk();
-        const listOfJobs = await this.adminforth.resource(this.resourceConfig.resourceId).list(Filters.EQ(startedByField, user.pk));
+        const listOfJobs = await this.adminforth.resource(this.resourceConfig.resourceId).list(Filters.EQ(startedByField, user.pk), 100, 0, Sorts.DESC(this.options.createdAtField));
         
         const jobsToReturn = listOfJobs.map(job => {
           return {
@@ -285,6 +363,7 @@ export default class  extends AdminForthPlugin {
             createdAt: job[this.options.createdAtField],
             status: job[this.options.statusField],
             progress: job[this.options.progressField],
+            customComponent: this.jobCustomComponents[job[this.options.jobHandlerField]],
           }
         });
         return { jobs: jobsToReturn };
@@ -296,6 +375,11 @@ export default class  extends AdminForthPlugin {
       path: `/plugin/${this.pluginInstanceId}/cancel-job`,
       handler: async ({ body }) => {
         const jobId = body.jobId;
+        const currentJob = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+        const oldStatus = currentJob[this.options.statusField];
+        if (oldStatus === 'DONE' || oldStatus === 'DONE_WITH_ERRORS' || oldStatus === 'CANCELLED') {
+          return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
+        }
         try {
           await this.adminforth.resource(this.getResourceId()).update(jobId, {
             [this.options.statusField]: 'CANCELLED',
@@ -306,7 +390,7 @@ export default class  extends AdminForthPlugin {
           });
           return { ok: true };
         } catch (error) {
-          return { ok: false }
+          return { ok: false, message: `Failed to cancel job with id ${jobId}.` };
         }
       }
     });
