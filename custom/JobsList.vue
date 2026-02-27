@@ -23,7 +23,10 @@
         </div>
       </template>
       <div>
-        <JobInfoPopup :job="job" />
+        <JobInfoPopup 
+          :job="job" 
+          :meta="meta"
+        />
       </div>
     </Modal>
 
@@ -35,15 +38,15 @@
 import type { IJob } from './utils';
 import { getTimeAgoString } from '@/utils';
 import { ProgressBar, Modal } from '@/afcl';
-import { useI18n } from 'vue-i18n';
 import JobInfoPopup from './JobInfoPopup.vue';
 import StateToIcon from './StateToIcon.vue';
-
-const { t } = useI18n();
 
 const props = defineProps<{
   jobs: IJob[];
   closeDropdown: () => void;
+  meta: {
+    pluginInstanceId: string;
+  };
 }>();
 
   

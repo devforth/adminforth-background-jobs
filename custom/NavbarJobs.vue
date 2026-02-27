@@ -26,6 +26,7 @@
         <JobsList 
           :closeDropdown="() => isDropdownOpen = false"
           :jobs="jobs" 
+          :meta="meta"
         />
       </div>
     </Transition>

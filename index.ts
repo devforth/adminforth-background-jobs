@@ -7,7 +7,7 @@ import { Level } from 'level';
 import { resolve } from "node:dns";
 import { set } from "@vueuse/core";
 
-type JobStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
+type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
 type getStateFieldParams = () => any;
 
@@ -65,7 +65,7 @@ export default class  extends AdminForthPlugin {
     await levelDb.put(taskId, JSON.stringify({ state, status }));
   }
 
-  private async setLevelDbTaskStatusField(levelDb: Level, taskId: string, status: JobStatus) {
+  private async setLevelDbTaskStatusField(levelDb: Level, taskId: string, status: TaskStatus) {
     const state = await this.getLevelDbTaskStateField(levelDb, taskId);
     await levelDb.del(taskId);
     await levelDb.put(taskId, JSON.stringify({ state, status }));
@@ -81,7 +81,7 @@ export default class  extends AdminForthPlugin {
     return Promise.resolve(null);
   }
 
-  private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<JobStatus> {
+  private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<TaskStatus> {
     const state = await levelDb.get(taskId);
     if (state) {
       const parsedState = JSON.parse(state);
@@ -141,8 +141,23 @@ export default class  extends AdminForthPlugin {
 
     const totalTasks = tasks.length;
     let completedTasks = 0;
+    let failedTasks = 0;
+    let lastJobStatus = 'IN_PROGRESS';
 
     const taskHandler = async ( taskIndex: number, taskState ) => {
+      if (lastJobStatus === 'CANCELLED') {
+        afLogger.info(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
+        return;
+      }
+
+      const currentJobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+      const currentJobStatus = currentJobRecord[this.options.statusField];
+
+      if (currentJobStatus === 'CANCELLED') {
+        lastJobStatus = 'CANCELLED';
+        afLogger.info(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
+        return;
+      }
 
       //define the setTaskStateField and getTaskStateField functions to pass to the task
       const setTaskStateField = async (state: Record<string, any>) => {
@@ -163,6 +178,7 @@ export default class  extends AdminForthPlugin {
       } catch (error) {
         afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${error}`, );
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'FAILED');
+        failedTasks++;
         return;
       } finally {
         //Update progress
@@ -181,11 +197,17 @@ export default class  extends AdminForthPlugin {
     });
 
     await Promise.all(tasksToExecute);
-
-    await this.adminforth.resource(this.getResourceId()).update(jobId, {
-      [this.options.statusField]: 'DONE',
-    })
-    this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE' });
+    if (lastJobStatus !== 'CANCELLED' && failedTasks === 0) {
+      await this.adminforth.resource(this.getResourceId()).update(jobId, {
+        [this.options.statusField]: 'DONE',
+      })
+      this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE' });
+    } else if (failedTasks > 0) {
+      await this.adminforth.resource(this.getResourceId()).update(jobId, {
+        [this.options.statusField]: 'DONE_WITH_ERRORS',
+      })
+      this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE_WITH_ERRORS' });
+    }
   }
 
   private async runProcessingUnfinishedTasks(
@@ -266,6 +288,26 @@ export default class  extends AdminForthPlugin {
           }
         });
         return { jobs: jobsToReturn };
+      }
+    });
+
+    server.endpoint({
+      method: 'POST',
+      path: `/plugin/${this.pluginInstanceId}/cancel-job`,
+      handler: async ({ body }) => {
+        const jobId = body.jobId;
+        try {
+          await this.adminforth.resource(this.getResourceId()).update(jobId, {
+            [this.options.statusField]: 'CANCELLED',
+          });
+          this.adminforth.websocket.publish('/background-jobs', { 
+            jobId, 
+            status: 'CANCELLED', 
+          });
+          return { ok: true };
+        } catch (error) {
+          return { ok: false }
+        }
       }
     });
   }
