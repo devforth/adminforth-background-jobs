@@ -5,5 +5,6 @@ export interface IJob {
   status: 'IN_PROGRESS' | 'DONE' | 'DONE_WITH_ERRORS' | 'CANCELLED';
   progress: number; // 0 to 100
   createdAt: Date;
+  finishedAt?: Date;
   customComponent?: AdminForthComponentDeclarationFull; 
 }

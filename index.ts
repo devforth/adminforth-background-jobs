@@ -413,6 +413,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             id: job[resourcePk],
             name: job[this.options.nameField],
             createdAt: job[this.options.createdAtField],
+            finishedAt: job[this.options.finishedAtField] || null,
             status: job[this.options.statusField],
             progress: job[this.options.progressField],
             customComponent: this.jobCustomComponents[job[this.options.jobHandlerField]],
