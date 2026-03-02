@@ -41,7 +41,6 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
   async modifyResourceConfig(adminforth: IAdminForth, resourceConfig: AdminForthResource) {
     super.modifyResourceConfig(adminforth, resourceConfig);
-    console.log('Modifying resource config for Background Jobs Plugin');
     if (!adminforth.config.customization?.globalInjections?.header) {
       adminforth.config.customization.globalInjections.header = [];
     }
@@ -51,6 +50,15 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         pluginInstanceId: this.pluginInstanceId,
       }
     });
+
+    if (!this.adminforth.config.componentsToExplicitRegister) {
+      this.adminforth.config.componentsToExplicitRegister = [];
+    }
+    this.adminforth.config.componentsToExplicitRegister.push(
+      {
+        file: this.componentPath('StateToIcon.vue')
+      }
+    );
 
     if (!this.resourceConfig.hooks) {
       this.resourceConfig.hooks = {};
@@ -138,6 +146,11 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     }
     return Promise.resolve(null);
   }
+
+  private async getTotalTasksInLevelDb(levelDb: Level): Promise<number> {
+    const count = await levelDb.get('_meta:count');
+    return count ? parseInt(count, 10) : 0;
+  }
   
   public registerTaskHandler({ jobHandlerName, handler, parallelLimit = 3,
   }:{jobHandlerName: string, handler: taskHandlerType, parallelLimit?: number}) {
@@ -197,7 +210,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     //create a level db instance for the job with name as jobId
     const jobLevelDb = new Level(`${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`, { valueEncoding: 'json' });
     this.levelDbInstances[jobId] = jobLevelDb;
-
+    await jobLevelDb.put('_meta:count', `${tasks.length}`);
     const limit2 = pLimit(parrallelLimit);
     const createTaskRecordsPromises = tasks.map((task, index) => {
       return limit2(() => this.createLevelDbTaskRecord(jobLevelDb, index.toString(), task.state));
@@ -526,7 +539,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           tasks.push(parsedTaskData);
           taskIndex++;
         }
-        return { ok: true, tasks };
+          
+        const total = await this.getTotalTasksInLevelDb(jobLevelDb);
+        return { ok: true, data: { tasks, total } };
       }
     });
   }
