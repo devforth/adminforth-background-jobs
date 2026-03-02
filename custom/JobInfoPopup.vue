@@ -1,7 +1,7 @@
 <template> 
     <div class="flex flex-col w-full min-w-96">
       <div class="flex items-center mb-1">
-        <div class="flex flex-col items-start">
+        <div class="flex flex-col items-start justify-end h-12">
           <h2 class="text-lg font-semibold dark:text-white">{{ job.name }}</h2>
           <Tooltip>
             <p class="text-xs text-gray-600 dark:text-gray-200 h-full">{{ t('Created:') }} {{ getTimeAgoString(new Date(job.createdAt)) }}</p>
@@ -10,7 +10,7 @@
             </template>
           </Tooltip>
         </div>
-        <div class="ml-auto flex flex-col items-start">
+        <div class="ml-auto flex flex-col items-start justify-end h-12">
           <div class="flex items-center">
             <p class=" text-gray-800 dark:text-white h-full"> {{  t('Progress:')  }} <span class="font-semibold" >{{ job.progress }}%</span></p>
             <StateToIcon :job="job" />
