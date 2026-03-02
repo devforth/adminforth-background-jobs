@@ -5,9 +5,7 @@ import { afLogger } from "adminforth";
 import pLimit from 'p-limit';
 import { Level } from 'level';
 import fs from 'fs/promises';
-import {Mutex, MutexInterface, Semaphore, SemaphoreInterface, withTimeout} from 'async-mutex';
-
-const mutex = new Mutex();
+import { Mutex } from 'async-mutex';
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
@@ -24,6 +22,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private jobCustomComponents: Record<string, AdminForthComponentDeclarationFull> = {};
   private jobParallelLimits: Record<string, number> = {};
   private levelDbInstances: Record<string, Level> = {};
+  private jobStateMutexes: Record<string, Mutex> = {};
 
   constructor(options: PluginOptions) {
     super(options, import.meta.url);
@@ -73,6 +72,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         delete this.levelDbInstances[recordId];
       }
 
+      // cleanup per-job mutex as well
+      delete this.jobStateMutexes[recordId];
+
       //delete level db folder for the job
       await fs.rm(levelDbPath, {
         recursive: true,
@@ -81,6 +83,13 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
       return {ok: true};
     })
+  }
+
+  private cleanupJobMutexIfTerminalStatus(jobId: string, status: string) {
+    // Keep mutex while job is active to preserve atomicity between concurrent tasks.
+    if (status === 'DONE' || status === 'DONE_WITH_ERRORS' || status === 'CANCELLED') {
+      delete this.jobStateMutexes[jobId];
+    }
   }
 
   private checkIfFieldInResource(resourceConfig: AdminForthResource, fieldName: string, fieldString?: string) {
@@ -279,12 +288,14 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         [this.options.finishedAtField]: (new Date()).toISOString(),
       })
       this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
+      this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
     } else if (failedTasks > 0) {
       await this.adminforth.resource(this.getResourceId()).update(jobId, {
         [this.options.statusField]: 'DONE_WITH_ERRORS',
         [this.options.finishedAtField]: (new Date()).toISOString(),
       })
       this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE_WITH_ERRORS' });
+      this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
     }
   }
 
@@ -370,6 +381,27 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
     const state = jobRecord[this.options.stateField];
     return JSON.parse(state);
+  }
+
+  public async updateJobFieldsAtomicly(jobId: string, updateFunction: () => Promise<void>) {
+    if (!jobId) {
+      throw new Error('updateJobFieldsAtomicly: jobId is required');
+    }
+    if (typeof updateFunction !== 'function') {
+      throw new Error('updateJobFieldsAtomicly: updateFunction must be a function');
+    }
+
+    // Ensure updates are atomic per jobId.
+    // Different jobs are not blocked by each other.
+    let mutex = this.jobStateMutexes[jobId];
+    if (!mutex) {
+      mutex = new Mutex();
+      this.jobStateMutexes[jobId] = mutex;
+    }
+
+    return mutex.runExclusive(async () => {
+      await updateFunction();
+    });
   }
 
   private async processAllUnfinishedJobs() {
