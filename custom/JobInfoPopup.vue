@@ -111,7 +111,7 @@ async function getJobTasks(limit: number = 10, offset: number = 0): Promise<{sta
       },
     });
     if (res.ok) {
-      return res.tasks;
+      return res.data;
     } else {
       console.error('Error fetching job tasks:', res.error);
       return [];
