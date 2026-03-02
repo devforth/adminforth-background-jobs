@@ -1,15 +1,18 @@
 import { AdminForthPlugin, Filters, Sorts } from "adminforth";
-import type { IAdminForth, IHttpServer, AdminForthResourcePages, AdminForthResourceColumn, AdminForthDataTypes, AdminForthResource, AdminUser, AdminForthComponentDeclarationFull } from "adminforth";
+import type { IAdminForth, IHttpServer, AdminForthResource, AdminUser, AdminForthComponentDeclarationFull } from "adminforth";
 import type { PluginOptions } from './types.js';
 import { afLogger } from "adminforth";
 import pLimit from 'p-limit';
 import { Level } from 'level';
 import fs from 'fs/promises';
+import {Mutex, MutexInterface, Semaphore, SemaphoreInterface, withTimeout} from 'async-mutex';
+
+const mutex = new Mutex();
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
 type getStateFieldParams = () => any;
-type taskHandlerType = ( { setTaskStateField, getTaskStateField }: { setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>;
+type taskHandlerType = ( { jobId, setTaskStateField, getTaskStateField }: { jobId: string; setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>;
 type taskType = {
   skip?: boolean;
   state: Record<string, any>;
@@ -146,7 +149,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     adminUser: AdminUser,
     tasks: taskType[],
     jobHandlerName: string,
-  ) {
+  ): Promise<string> {
 
     const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
     if (!handleTask) {
@@ -161,6 +164,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       [this.options.progressField]: 0,
       [this.options.statusField]: 'IN_PROGRESS',
       [this.options.jobHandlerField]: jobHandlerName,
+      [this.options.stateField]: '{}'
     }
 
     const creationResult = await this.adminforth.resource(this.getResourceId()).create(objectToSave);
@@ -193,6 +197,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await Promise.all(createTaskRecordsPromises);
 
     this.runProcessingTasks(tasks, jobLevelDb, jobId, handleTask, parrallelLimit);
+    return jobId;
   }
 
   private async runProcessingTasks(
@@ -238,7 +243,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
       //handling the task 
       try {
-        await handleTask({ setTaskStateField, getTaskStateField });
+        await handleTask({ jobId, setTaskStateField, getTaskStateField });
 
         //Set task status to completed in level db
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'DONE');
@@ -348,6 +353,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     const state = jobRecord[this.options.stateField];
     const parsedState = JSON.parse(state);
     parsedState[key] = value;
+    this.adminforth.websocket.publish(`/background-jobs`, { jobId, state: parsedState });
     await this.adminforth.resource(this.getResourceId()).update(jobId, {
       [this.options.stateField]: JSON.stringify(parsedState),
     });
@@ -415,6 +421,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             createdAt: job[this.options.createdAtField],
             finishedAt: job[this.options.finishedAtField] || null,
             status: job[this.options.statusField],
+            state: JSON.parse(job[this.options.stateField]),
             progress: job[this.options.progressField],
             customComponent: this.jobCustomComponents[job[this.options.jobHandlerField]],
           }

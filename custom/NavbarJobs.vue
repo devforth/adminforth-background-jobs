@@ -97,11 +97,18 @@
         if (data.finishedAt) {
           jobs.value[jobIndex].finishedAt = data.finishedAt;
         }
+        if (data.state) {
+          jobs.value[jobIndex].state = {
+            ...jobs.value[jobIndex].state,
+            ...data.state,
+          };
+        }
       } else {
         jobs.value.unshift({
           id: data.jobId,
           name: data.name || 'Unknown Job',
           status: data.status || 'IN_PROGRESS',
+          state: data.state || {},
           progress: data.progress || 0,
           createdAt: data.createdAt || new Date().toISOString(),
           customComponent: data.customComponent,
