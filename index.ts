@@ -273,7 +273,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         [this.options.statusField]: 'DONE',
         [this.options.finishedAtField]: (new Date()).toISOString(),
       })
-      this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE' });
+      this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
     } else if (failedTasks > 0) {
       await this.adminforth.resource(this.getResourceId()).update(jobId, {
         [this.options.statusField]: 'DONE_WITH_ERRORS',

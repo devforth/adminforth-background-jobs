@@ -94,6 +94,9 @@
         if (data.progress !== undefined) {
           jobs.value[jobIndex].progress = data.progress;
         }
+        if (data.finishedAt) {
+          jobs.value[jobIndex].finishedAt = data.finishedAt;
+        }
       } else {
         jobs.value.unshift({
           id: data.jobId,
