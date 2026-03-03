@@ -1,6 +1,7 @@
 <template>
   <div class="w-1vw md:w-64 bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 rounded-md">
     <Modal 
+      ref="modalRef"
       class="p-4"
       v-for="job in props.jobs" :key="job.id" 
       :beforeCloseFunction="onBeforeOpen" 
@@ -31,6 +32,7 @@
       <JobInfoPopup
         :job="job" 
         :meta="meta"
+        :closeModal="closeModal"
       />
     </Modal>
 
@@ -45,6 +47,26 @@ import { ProgressBar, Modal } from '@/afcl';
 import JobInfoPopup from './JobInfoPopup.vue';
 import StateToIcon from './StateToIcon.vue';
 import { ref } from 'vue';
+
+const modalRef = ref<any>(null);
+
+function closeModal() {
+  const m = modalRef.value;
+  if (!m) return;
+
+  if (typeof m.close === 'function') {
+    m.close();
+    return;
+  }
+
+  if (Array.isArray(m)) {
+    m.forEach((inst: any) => {
+      if (inst?.close && typeof inst.close === 'function') {
+        inst.close();
+      }
+    });
+  }
+}
 
 const props = defineProps<{
   jobs: IJob[];
