@@ -51,6 +51,14 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       }
     });
 
+    // Global API injection: exposes OpenJobInfoPopup(jobId) to open job details from anywhere
+    (adminforth.config.customization.globalInjections.header).push({
+      file: this.componentPath('GlobalJobApi.vue'),
+      meta: {
+        pluginInstanceId: this.pluginInstanceId,
+      }
+    });
+
     if (!this.adminforth.config.componentsToExplicitRegister) {
       this.adminforth.config.componentsToExplicitRegister = [];
     }
@@ -474,6 +482,31 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         return { jobs: jobsToReturn };
       }
     });
+
+    server.endpoint({
+      method: 'POST',
+      path: `/plugin/${this.pluginInstanceId}/get-job-info`,
+      handler: async ({ adminUser, body }) => {
+        const jobId = body.jobId;
+
+        const job = await this.adminforth.resource(this.resourceConfig.resourceId).get(Filters.EQ(this.getResourcePk(), jobId));
+        if (!job) {
+          return { ok: false, message: `Job with id ${jobId} not found.` };
+        }
+        const jobToReturn = {
+          id: job[this.getResourcePk()],
+          name: job[this.options.nameField],
+          createdAt: job[this.options.createdAtField],
+          finishedAt: job[this.options.finishedAtField] || null,
+          status: job[this.options.statusField],
+          state: JSON.parse(job[this.options.stateField]),
+          progress: job[this.options.progressField],
+          customComponent: this.jobCustomComponents[job[this.options.jobHandlerField]],
+        };
+        return { ok: true, job: jobToReturn };
+      }
+    });
+
 
     server.endpoint({
       method: 'POST',
