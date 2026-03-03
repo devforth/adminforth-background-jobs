@@ -1,6 +1,7 @@
 <template>
   <div class="w-1vw md:w-64 bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 rounded-md">
     <Modal 
+      class="p-4"
       v-for="job in props.jobs" :key="job.id" 
       :beforeCloseFunction="onBeforeOpen" 
       :beforeOpenFunction="onBeforeClose"
