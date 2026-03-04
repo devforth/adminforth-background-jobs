@@ -404,12 +404,12 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return JSON.parse(state);
   }
 
-  public async updateJobFieldsAtomicly(jobId: string, updateFunction: () => Promise<void>) {
+  public async updateJobFieldsAtomically(jobId: string, updateFunction: () => Promise<void>) {
     if (!jobId) {
-      throw new Error('updateJobFieldsAtomicly: jobId is required');
+      throw new Error('updateJobFieldsAtomically: jobId is required');
     }
     if (typeof updateFunction !== 'function') {
-      throw new Error('updateJobFieldsAtomicly: updateFunction must be a function');
+      throw new Error('updateJobFieldsAtomically: updateFunction must be a function');
     }
 
     // Ensure updates are atomic per jobId.
