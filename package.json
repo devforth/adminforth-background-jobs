@@ -16,7 +16,23 @@
   "description": "",
   "devDependencies": {
     "@types/node": "latest",
+    "semantic-release": "^24.2.1",
+    "semantic-release-slack-bot": "^4.0.2",
     "typescript": "^5.7.3"
+  },
+  "release": {
+    "plugins": [
+      [
+        "semantic-release-slack-bot",
+        {
+          "packageName": "@adminforth/background-jobs",
+          "notifyOnSuccess": true,
+          "notifyOnFail": true,
+          "slackIcon": ":package:",
+          "markdownReleaseNotes": true
+        }
+      ]
+    ]
   },
   "dependencies": {
     "@vueuse/core": "^14.2.1",
@@ -25,6 +41,6 @@
     "p-limit": "^7.3.0"
   },
   "peerDependencies": {
-    "adminforth": "next"
+    "adminforth": "^2.24.0"
   }
 }
