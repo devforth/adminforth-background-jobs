@@ -33,7 +33,7 @@
           </Tooltip>
         </div>
       </div>
-      <div class="flex items-center gap-4 w-full">
+      <div class="flex items-center gap-4 w-full mt-4">
         <ProgressBar 
           :current-value="job.progress" 
           :max-value="100" 
