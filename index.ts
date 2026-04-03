@@ -485,7 +485,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
     server.endpoint({
       method: 'POST',
-      path: `/plugin/${this.pluginInstanceId}/get-job-info`,
+      path: `/plugin/get-background-job-info`,
       handler: async ({ adminUser, body }) => {
         const jobId = body.jobId;
 

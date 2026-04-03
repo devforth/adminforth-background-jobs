@@ -4,8 +4,8 @@
       ref="modalRef"
       class="p-4"
       v-for="job in props.jobs" :key="job.id" 
-      :beforeCloseFunction="onBeforeOpen" 
-      :beforeOpenFunction="onBeforeClose"
+      :beforeCloseFunction="onBeforeClose" 
+      :beforeOpenFunction="onBeforeOpen"
       removeFromDomOnClose
     >
       <template #trigger>

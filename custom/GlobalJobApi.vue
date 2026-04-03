@@ -5,11 +5,11 @@
       ref="dialogRef" 
       removeFromDomOnClose 
       class="p-4"
-      :beforeCloseFunction="() => { currentJob.value = null; }"
+      :beforeCloseFunction="() => { jobStore.clearCurrentJob(); jobStore.setIsOpened(false); }"
     >
       <JobInfoPopup
-        v-if="currentJob"
-        :job="currentJob"
+        v-if="jobStore.currentJob"
+        :job="jobStore.currentJob"
         :meta="meta"
         :closeModal="closeModal"
       />
@@ -18,14 +18,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount } from 'vue';
-import { callAdminForthApi } from '@/utils';
-import { useAdminforth } from '@/adminforth';
+import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { Modal } from '@/afcl';
 import JobInfoPopup from './JobInfoPopup.vue';
 import websocket from '@/websocket';
+import { useJobInfoStore } from './useBackgroundJobPlugin';
 
-const adminforth = useAdminforth();
+const jobStore = useJobInfoStore();
+
+const dialogRef = ref<any>(null);
 
 const props = defineProps<{
   meta: {
@@ -33,44 +34,34 @@ const props = defineProps<{
   }
 }>();
 
-const dialogRef = ref<any>(null);
-const currentJob = ref<any>(null);
 
 function closeModal() {
   if (!dialogRef.value) return;
   if (typeof dialogRef.value.close === 'function') {
     dialogRef.value.close();
+    jobStore.clearCurrentJob();
+    jobStore.setIsOpened(false);
     return;
   }
   if (typeof dialogRef.value.hide === 'function') {
+    jobStore.clearCurrentJob();
+    jobStore.setIsOpened(false);
     dialogRef.value.hide();
   }
 }
 
-async function openJobInfo(jobId: string) {
-  if (!jobId) return;
-  try {
-    const res = await callAdminForthApi({
-      path: `/plugin/${props.meta.pluginInstanceId}/get-job-info`,
-      method: 'POST',
-      body: { jobId },
-    });
-    if (res && res.ok) {
-      currentJob.value = res.job;
-      // open dialog
-      if (dialogRef.value && typeof dialogRef.value.open === 'function') {
-        dialogRef.value.open();
-      } else if (dialogRef.value && typeof dialogRef.value.show === 'function') {
-        dialogRef.value.show();
-      }
-    } else {
-      adminforth.alert({ variant: 'danger', message: res?.message || 'Failed to load job info' });
-    }
-  } catch (e) {
-    console.error('OpenJobInfoPopup error', e);
-    adminforth.alert({ variant: 'danger', message: 'Failed to load job info' });
+watch(() => jobStore.isOpened, (newVal) => {
+  if (newVal) {
+    dialogRef.value?.open?.();
+  } else {
+    dialogRef.value?.close?.();
   }
+});
+
+async function openJobInfo(jobId: string) {
+  jobStore.openJobInfoPopup(jobId);
 }
+
 
 onMounted(() => {
   // expose global function
@@ -79,21 +70,18 @@ onMounted(() => {
   window.OpenJobInfoPopup = openJobInfo;
 
   websocket.subscribe('/background-jobs', (data) => {
-    if (data.jobId === currentJob.value?.id) {
+    if (data.jobId === jobStore.currentJob?.id) {
       if (data.status) { 
-        currentJob.value.status = data.status;
+        jobStore.updateCurrentJob({ status: data.status });
       }
       if (data.progress !== undefined) {
-        currentJob.value.progress = data.progress;
+        jobStore.updateCurrentJob({ progress: data.progress });
       }
       if (data.finishedAt) {
-        currentJob.value.finishedAt = data.finishedAt;
+        jobStore.updateCurrentJob({ finishedAt: data.finishedAt });
       }
       if (data.state) {
-        currentJob.value.state = {
-          ...currentJob.value.state,
-          ...data.state,
-        };
+        jobStore.updateCurrentJob({ state: { ...jobStore.currentJob?.state, ...data.state } });
       }
     }
   });
