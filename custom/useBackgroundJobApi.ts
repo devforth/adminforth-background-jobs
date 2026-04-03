@@ -3,7 +3,7 @@ import { callAdminForthApi } from '@/utils';
 import { useAdminforth } from '@/adminforth';
 import { defineStore } from 'pinia'
 
-export const useJobInfoStore = defineStore('jobInfo', () => {
+export const useBackgroundJobApi = defineStore('jobInfo', () => {
   const currentJob = ref<any>(null);
   const isOpened = ref(false);
   const adminforth = useAdminforth();

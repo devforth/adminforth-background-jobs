@@ -22,9 +22,9 @@ import { ref, onMounted, onBeforeUnmount, watch } from 'vue';
 import { Modal } from '@/afcl';
 import JobInfoPopup from './JobInfoPopup.vue';
 import websocket from '@/websocket';
-import { useJobInfoStore } from './useBackgroundJobPlugin';
+import { useBackgroundJobApi } from './useBackgroundJobApi';
 
-const jobStore = useJobInfoStore();
+const jobStore = useBackgroundJobApi();
 
 const dialogRef = ref<any>(null);
 
