@@ -42,7 +42,7 @@
           :showLabels="false"
           :showValues="false"
           :show-progress="false"
-          :height="6"
+          :height="3"
         />
         <Button class="h-8" v-if="job.status === 'IN_PROGRESS'" @click="cancelJob"> {{ t('Cancel') }} </Button>
       </div>
