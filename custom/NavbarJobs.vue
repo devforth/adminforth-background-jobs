@@ -3,7 +3,7 @@
     <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
       <div class="relative flex items-center justify-center" v-if="jobs.length > 0">
         <Tooltip>
-          <IconBriefcaseSolid class="w-7 h-7 text-gray-600 hover:text-gray-700" />
+          <IconBriefcaseSolid class="w-7 h-7 text-lightNavbarIcons hover:text-darkNavbarIcons" />
           <template #tooltip>
             {{ t('All jobs completed') }}
           </template>
