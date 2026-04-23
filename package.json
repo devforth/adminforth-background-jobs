@@ -20,7 +20,7 @@
     "progress-tracking",
     "long-running-tasks"
   ],
-  "author": "",
+  "author": "DevForth (https://devforth.io)",
   "license": "MIT",
   "description": "Background jobs plugin for AdminForth to run and manage long tasks from resources",
   "devDependencies": {
