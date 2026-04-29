@@ -15,7 +15,7 @@ type taskType = {
   skip?: boolean;
   state: Record<string, any>;
 }
-
+ 
 export default class BackgroundJobsPlugin extends AdminForthPlugin {
   options: PluginOptions;
   private taskHandlers: Record<string, taskHandlerType> = {};
