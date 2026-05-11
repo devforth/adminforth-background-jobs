@@ -1,5 +1,5 @@
 <template>
-  <div ref="dropdownRef">
+  <div class="relative" ref="dropdownRef">
     <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
       <div class="relative flex items-center justify-center" v-if="jobs.length > 0">
         <Tooltip>
@@ -30,7 +30,7 @@
       leave-from-class="opacity-100 scale-100"
       leave-to-class="opacity-0 scale-95"
     >
-      <div v-show="isDropdownOpen" class="absolute right-28 top-14 md:top-12 rounded z-10 overflow-y-auto max-h-96 ">
+      <div v-show="isDropdownOpen" class="absolute right-0 top-14 md:top-12 rounded z-10 overflow-y-auto max-h-96 ">
         <JobsList 
           :closeDropdown="() => isDropdownOpen = false"
           :jobs="jobs" 
