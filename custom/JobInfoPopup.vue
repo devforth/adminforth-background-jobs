@@ -35,7 +35,7 @@
       </div>
       <div class="flex items-center gap-4 w-full mt-4">
         <ProgressBar 
-          :current-value="job.progress" 
+          :current-value="parseInt(job.progress, 10)" 
           :max-value="100" 
           :min-value="0"
           :showAnimation="job.status === 'IN_PROGRESS'"

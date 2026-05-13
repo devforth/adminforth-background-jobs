@@ -17,7 +17,7 @@
             </p>
             <ProgressBar 
               class="mt-1"
-              :current-value="job.progress" 
+              :current-value="parseInt(job.progress, 10)" 
               :max-value="100" 
               :min-value="0"
               :showAnimation="job.status === 'IN_PROGRESS'"
