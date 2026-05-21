@@ -67,6 +67,7 @@ import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils'
 import { useI18n } from 'vue-i18n';
 import StateToIcon from './StateToIcon.vue';
 import { useAdminforth } from '@/adminforth';
+import { watch } from 'vue';
 
 
 const { t } = useI18n();
@@ -132,6 +133,19 @@ async function getJobTasks(limit: number = 10, offset: number = 0): Promise<{sta
     return [];
   }
 }
+
+watch(
+  () => props.job.state?.error,
+  (error) => {
+    if (error) {
+      adminforth.alert({
+        message: error,
+        variant: 'danger',
+      });
+    }
+  },
+  { immediate: true }
+);
 
 
 
