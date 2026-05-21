@@ -279,7 +279,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'DONE');
         this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: "DONE" });
       } catch (error) {
-        afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${error}`, );
+        const errorMessage = error?.message || 'Unknown error';
+        afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${errorMessage}`, );
+        await this.setJobField(jobId, 'error', errorMessage);
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'FAILED');
         this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: "FAILED" });
         failedTasks++;
