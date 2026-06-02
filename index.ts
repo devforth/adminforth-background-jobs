@@ -11,6 +11,12 @@ type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = (state: Record<string, any>) => void;
 type getStateFieldParams = () => any;
 type taskHandlerType = ( { jobId, setTaskStateField, getTaskStateField }: { jobId: string; setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>;
+type allTasksDoneStatusType = {
+  jobId: string;
+  failedTasks: number;
+  succeededTasks: number;
+};
+type onAllTasksDoneType = (status: allTasksDoneStatusType) => Promise<void> | void;
 type taskType = {
   skip?: boolean;
   state: Record<string, any>;
@@ -19,6 +25,7 @@ type taskType = {
 export default class BackgroundJobsPlugin extends AdminForthPlugin {
   options: PluginOptions;
   private taskHandlers: Record<string, taskHandlerType> = {};
+  private onAllTasksDoneHandlers: Partial<Record<string, onAllTasksDoneType>> = {};
   private jobCustomComponents: Record<string, AdminForthComponentDeclarationFull> = {};
   private jobParallelLimits: Record<string, number> = {};
   private levelDbInstances: Record<string, Level> = {};
@@ -159,12 +166,48 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     const count = await levelDb.get('_meta:count');
     return count ? parseInt(count, 10) : 0;
   }
+
+  private async getAllTasksDoneStatus(levelDb: Level): Promise<Omit<allTasksDoneStatusType, 'jobId'>> {
+    const totalTasks = await this.getTotalTasksInLevelDb(levelDb);
+    let failedTasks = 0;
+    let succeededTasks = 0;
+
+    for (let taskIndex = 0; taskIndex < totalTasks; taskIndex++) {
+      const status = await this.getLevelDbTaskStatusField(levelDb, taskIndex.toString());
+      if (status === 'FAILED') {
+        failedTasks++;
+      } else if (status === 'DONE') {
+        succeededTasks++;
+      }
+    }
+
+    return { failedTasks, succeededTasks };
+  }
+
+  private async triggerOnAllTasksDone(onAllTasksDone: onAllTasksDoneType | undefined, levelDb: Level, jobId: string) {
+    if (!onAllTasksDone) {
+      return;
+    }
+
+    try {
+      const status = await this.getAllTasksDoneStatus(levelDb);
+      await onAllTasksDone({ jobId, ...status });
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      afLogger.error(`Error in onAllTasksDone callback for job ${jobId}: ${errorMessage}`);
+    }
+  }
   
-  public registerTaskHandler({ jobHandlerName, handler, parallelLimit = 3,
-  }:{jobHandlerName: string, handler: taskHandlerType, parallelLimit?: number}) {
+  public registerTaskHandler({ jobHandlerName, handler, parallelLimit = 3, onAllTasksDone,
+  }:{jobHandlerName: string, handler: taskHandlerType, parallelLimit?: number, onAllTasksDone?: onAllTasksDoneType}) {
     //register the handler in a map with jobHandlerName as key and handler as value
     this.taskHandlers[jobHandlerName] = handler;
     this.jobParallelLimits[jobHandlerName] = parallelLimit;
+    if (onAllTasksDone) {
+      this.onAllTasksDoneHandlers[jobHandlerName] = onAllTasksDone;
+    } else {
+      delete this.onAllTasksDoneHandlers[jobHandlerName];
+    }
   }
 
   public registerTaskDetailsComponent({
@@ -182,6 +225,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   ): Promise<string> {
 
     const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
+    const onAllTasksDone = this.onAllTasksDoneHandlers[jobHandlerName];
     if (!handleTask) {
       throw new Error(`No handler registered for jobHandler ${jobHandlerName}. Please register a handler using the registerTaskHandler method before starting a job with this jobHandler.`);
     }
@@ -226,7 +270,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
     await Promise.all(createTaskRecordsPromises);
 
-    this.runProcessingTasks(tasks, jobLevelDb, jobId, handleTask, parrallelLimit);
+    this.runProcessingTasks(tasks, jobLevelDb, jobId, handleTask, parrallelLimit, onAllTasksDone);
     return jobId;
   }
 
@@ -236,6 +280,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     jobId: string,
     handleTask: taskHandlerType,
     parrallelLimit: number,
+    onAllTasksDone?: onAllTasksDoneType,
   ) {
     const totalTasks = tasks.length;
     let completedTasks = 0;
@@ -312,6 +357,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       })
       this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
       this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
+      await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
     } else if (failedTasks > 0) {
       await this.adminforth.resource(this.getResourceId()).update(jobId, {
         [this.options.statusField]: 'DONE_WITH_ERRORS',
@@ -319,6 +365,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       })
       this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE_WITH_ERRORS' });
       this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
+      await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
     }
   }
 
@@ -355,6 +402,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       return;
     }
     const parrallelLimit = this.jobParallelLimits[jobHandlerName] || 3;
+    const onAllTasksDone = this.onAllTasksDoneHandlers[jobHandlerName];
     
     const unfinishedTasks: taskType[] = [];
     let taskIndex = 0;
@@ -378,7 +426,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       }
       taskIndex++;
     }
-    await this.runProcessingTasks(unfinishedTasks, jobLevelDb, job[this.getResourcePk()], handleTask, parrallelLimit);
+    await this.runProcessingTasks(unfinishedTasks, jobLevelDb, job[this.getResourcePk()], handleTask, parrallelLimit, onAllTasksDone);
 
   }
 
