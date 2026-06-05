@@ -54,6 +54,8 @@
       :meta="job.customComponent"
       :getJobTasks="getJobTasks"
       :job="job"
+      :subscribeToJobStateFields="subscribeToJobStateFields"
+      :subscribeToJobTaskFields="subscribeToJobTaskFields"
     />
 </template>
 
@@ -67,12 +69,15 @@ import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils'
 import { useI18n } from 'vue-i18n';
 import StateToIcon from './StateToIcon.vue';
 import { useAdminforth } from '@/adminforth';
-import { watch } from 'vue';
+import { onBeforeUnmount, ref, watch } from 'vue';
+import websocket from '@/websocket';
+import { useBackgroundJobApi } from './useBackgroundJobApi';
 
 
 const { t } = useI18n();
 
 const adminforth = useAdminforth();
+const jobStore = useBackgroundJobApi();
 
 const props = defineProps<{
   job: IJob;
@@ -81,6 +86,88 @@ const props = defineProps<{
   };
   closeModal: () => void;
 }>();
+
+type JobTask = {
+  state: Record<string, any>;
+  status: string;
+};
+
+type JobStateFieldUpdate = {
+  jobId: string;
+  fieldName: string;
+  value: any;
+};
+
+type TaskStateFieldUpdate = JobStateFieldUpdate & {
+  taskIndex: number;
+};
+
+const jobTasks = ref<JobTask[]>([]);
+const subscriptionCleanups = new Set<() => void>();
+
+function getUniqueFieldNames(fieldNames: string[]): string[] {
+  return Array.from(new Set(fieldNames.filter((fieldName) => typeof fieldName === 'string' && fieldName.length > 0)));
+}
+
+function createStateFieldSubscription(
+  fieldNames: string[],
+  pathFactory: (fieldName: string) => string,
+  callback: (data: any) => void,
+) {
+  const paths = getUniqueFieldNames(fieldNames).map(pathFactory);
+  for (const path of paths) {
+    websocket.subscribe(path, callback);
+  }
+
+  const unsubscribe = () => {
+    for (const path of paths) {
+      websocket.unsubscribe(path);
+    }
+    subscriptionCleanups.delete(unsubscribe);
+  };
+  subscriptionCleanups.add(unsubscribe);
+  return unsubscribe;
+}
+
+function handleJobStateFieldUpdate(data: JobStateFieldUpdate) {
+  if (data.jobId !== props.job.id) {
+    return;
+  }
+
+  jobStore.updateCurrentJob({
+    state: {
+      ...props.job.state,
+      [data.fieldName]: data.value,
+    },
+  });
+}
+
+function handleTaskStateFieldUpdate(data: TaskStateFieldUpdate) {
+  if (data.jobId !== props.job.id || !jobTasks.value[data.taskIndex]) {
+    return;
+  }
+
+  jobTasks.value[data.taskIndex].state = {
+    ...jobTasks.value[data.taskIndex].state,
+    [data.fieldName]: data.value,
+  };
+}
+
+function subscribeToJobStateFields(fieldNames: string[]) {
+  return createStateFieldSubscription(
+    fieldNames,
+    (fieldName) => `/background-jobs-state-update/${props.job.id}/${encodeURIComponent(fieldName)}`,
+    handleJobStateFieldUpdate,
+  );
+}
+
+function subscribeToJobTaskFields(fieldNames: string[]) {
+  return createStateFieldSubscription(
+    fieldNames,
+    (fieldName) => `/background-jobs-task-state-update/${props.job.id}/${encodeURIComponent(fieldName)}`,
+    handleTaskStateFieldUpdate,
+  );
+}
 
 async function cancelJob() {
   // Implement job cancellation logic here
@@ -111,7 +198,7 @@ async function cancelJob() {
 
 
 
-async function getJobTasks(limit: number = 10, offset: number = 0): Promise<{state: Record<string, any>, status: string}[]> {
+async function getJobTasks(limit: number = 10, offset: number = 0): Promise<JobTask[]> {
   try {
     const res = await callAdminForthApi({
       path: `/plugin/${props.meta.pluginInstanceId}/get-tasks`,
@@ -123,7 +210,12 @@ async function getJobTasks(limit: number = 10, offset: number = 0): Promise<{sta
       },
     });
     if (res.ok) {
-      return res.data;
+      const tasks = res.data.tasks as JobTask[];
+      const startIndex = offset || 0;
+      for (let taskIndex = 0; taskIndex < tasks.length; taskIndex++) {
+        jobTasks.value[startIndex + taskIndex] = tasks[taskIndex];
+      }
+      return jobTasks.value.slice(startIndex, startIndex + tasks.length);
     } else {
       console.error('Error fetching job tasks:', res.error);
       return [];
@@ -146,6 +238,12 @@ watch(
   },
   { immediate: true }
 );
+
+onBeforeUnmount(() => {
+  for (const unsubscribe of Array.from(subscriptionCleanups)) {
+    unsubscribe();
+  }
+});
 
 
 

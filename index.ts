@@ -21,6 +21,10 @@ type taskType = {
   skip?: boolean;
   state: Record<string, any>;
 }
+
+function encodeStateFieldName(fieldName: string): string {
+  return encodeURIComponent(fieldName);
+}
  
 export default class BackgroundJobsPlugin extends AdminForthPlugin {
   options: PluginOptions;
@@ -184,6 +188,25 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return { failedTasks, succeededTasks };
   }
 
+  private publishJobStateField(jobId: string, fieldName: string, value: any) {
+    this.adminforth.websocket.publish(`/background-jobs-state-update/${jobId}/${encodeStateFieldName(fieldName)}`, {
+      jobId,
+      fieldName,
+      value,
+    });
+  }
+
+  private publishTaskStateFields(jobId: string, taskIndex: number, state: Record<string, any>) {
+    for (const [fieldName, value] of Object.entries(state)) {
+      this.adminforth.websocket.publish(`/background-jobs-task-state-update/${jobId}/${encodeStateFieldName(fieldName)}`, {
+        jobId,
+        taskIndex,
+        fieldName,
+        value,
+      });
+    }
+  }
+
   private async triggerOnAllTasksDone(onAllTasksDone: onAllTasksDoneType | undefined, levelDb: Level, jobId: string) {
     if (!onAllTasksDone) {
       return;
@@ -306,8 +329,8 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
       //define the setTaskStateField and getTaskStateField functions to pass to the task
       const setTaskStateField = async (state: Record<string, any>) => {
-        this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, state });
         await this.setLevelDbTaskStateField(jobLevelDb, taskIndex.toString(), state);
+        this.publishTaskStateFields(jobId, taskIndex, state);
       }
       const getTaskStateField = async () => {
         return await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString());
@@ -435,10 +458,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     const state = jobRecord[this.options.stateField];
     const parsedState = JSON.parse(state);
     parsedState[key] = value;
-    this.adminforth.websocket.publish(`/background-jobs`, { jobId, state: parsedState });
     await this.adminforth.resource(this.getResourceId()).update(jobId, {
       [this.options.stateField]: JSON.stringify(parsedState),
     });
+    this.publishJobStateField(jobId, key, value);
   }
 
   public async getJobField(jobId: string, key: string) {
