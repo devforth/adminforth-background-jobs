@@ -5,7 +5,7 @@
       class="p-4"
       v-for="job in props.jobs" :key="job.id" 
       :beforeCloseFunction="onBeforeClose" 
-      :beforeOpenFunction="onBeforeOpen"
+      :beforeOpenFunction="() => onBeforeOpen(job)"
       removeFromDomOnClose
     >
       <template #trigger>
@@ -30,7 +30,8 @@
         </div>
       </template>
       <JobInfoPopup
-        :job="job" 
+        v-if="loadedJobs[job.id]"
+        :job="loadedJobs[job.id]"
         :meta="meta"
         :closeModal="closeModal"
       />
@@ -42,7 +43,7 @@
 
 <script setup lang="ts">
 import type { IJob } from './utils';
-import { getTimeAgoString } from '@/utils';
+import { callAdminForthApi, getTimeAgoString } from '@/utils';
 import { ProgressBar, Modal } from '@/afcl';
 import JobInfoPopup from './JobInfoPopup.vue';
 import StateToIcon from './StateToIcon.vue';
@@ -78,9 +79,34 @@ const props = defineProps<{
 
 
 const isModalOpen = ref(false);
+const loadedJobs = ref<Record<string, IJob>>({});
 
-function onBeforeOpen() {
+async function onBeforeOpen(job: IJob) {
   props.closeDropdown();
+  try {
+    const res = await callAdminForthApi({
+      path: `/plugin/get-background-job-info`,
+      method: 'POST',
+      body: { jobId: job.id },
+    });
+
+    if (res?.ok && res.job) {
+      loadedJobs.value[job.id] = res.job;
+      return;
+    }
+
+    console.log('[background-jobs] failed to load full job info', {
+      jobId: job.id,
+      response: res,
+    });
+  } catch (error) {
+    console.log('[background-jobs] failed to load full job info', {
+      error,
+      jobId: job.id,
+    });
+  }
+
+  loadedJobs.value[job.id] = job;
 }
 
 function onBeforeClose() {

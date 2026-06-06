@@ -134,12 +134,14 @@ function handleJobStateFieldUpdate(data: JobStateFieldUpdate) {
     return;
   }
 
-  jobStore.updateCurrentJob({
-    state: {
-      ...props.job.state,
-      [data.fieldName]: data.value,
-    },
-  });
+  props.job.state[data.fieldName] = data.value;
+  if (jobStore.currentJob?.id === props.job.id) {
+    jobStore.updateCurrentJob({
+      state: {
+        ...props.job.state,
+      },
+    });
+  }
 }
 
 function handleTaskStateFieldUpdate(data: TaskStateFieldUpdate) {
