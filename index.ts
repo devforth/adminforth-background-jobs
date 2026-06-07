@@ -8,9 +8,16 @@ import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
-type setStateFieldParams = (state: Record<string, any>) => void;
-type getStateFieldParams = () => any;
-type taskHandlerType = ( { jobId, setTaskStateField, getTaskStateField }: { jobId: string; setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams } ) => Promise<void>;
+type setStateFieldParams = {
+  (fieldName: string, value: any): Promise<void>;
+  (state: Record<string, any>): Promise<void>;
+};
+type getStateFieldParams = {
+  (fieldName: string): Promise<any>;
+  (): Promise<Record<string, any>>;
+};
+type getStateParams = () => Promise<Record<string, any>>;
+type taskHandlerType = ( { jobId, setTaskStateField, getTaskStateField, getState }: { jobId: string; setTaskStateField: setStateFieldParams; getTaskStateField: getStateFieldParams; getState: getStateParams } ) => Promise<void>;
 type allTasksDoneStatusType = {
   jobId: string;
   failedTasks: number;
@@ -34,6 +41,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private jobParallelLimits: Record<string, number> = {};
   private levelDbInstances: Record<string, Level> = {};
   private jobStateMutexes: Record<string, Mutex> = {};
+  private deprecatedWarningsShown = new Set<string>();
 
   constructor(options: PluginOptions) {
     super(options, import.meta.url);
@@ -207,6 +215,15 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     }
   }
 
+  private warnDeprecatedOnce(key: string, message: string) {
+    if (this.deprecatedWarningsShown.has(key)) {
+      return;
+    }
+
+    this.deprecatedWarningsShown.add(key);
+    afLogger.warn(message);
+  }
+
   private async triggerOnAllTasksDone(onAllTasksDone: onAllTasksDoneType | undefined, levelDb: Level, jobId: string) {
     if (!onAllTasksDone) {
       return;
@@ -245,6 +262,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     adminUser: AdminUser,
     tasks: taskType[],
     jobHandlerName: string,
+    initialState: Record<string, any> = {},
   ): Promise<string> {
 
     const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
@@ -261,7 +279,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       [this.options.progressField]: 0,
       [this.options.statusField]: 'IN_PROGRESS',
       [this.options.jobHandlerField]: jobHandlerName,
-      [this.options.stateField]: '{}'
+      [this.options.stateField]: initialState
     }
 
     const creationResult = await this.adminforth.resource(this.getResourceId()).create(objectToSave);
@@ -273,7 +291,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     }    
     const jobId = createdRecord[this.getResourcePk()];
     
-    this.adminforth.websocket.publish('/background-jobs', { 
+    this.adminforth.websocket.publish('/background-jobs-job-update', { 
       jobId, 
       status: 'IN_PROGRESS', 
       name: jobName,
@@ -327,13 +345,39 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         return;
       }
 
-      //define the setTaskStateField and getTaskStateField functions to pass to the task
-      const setTaskStateField = async (state: Record<string, any>) => {
-        await this.setLevelDbTaskStateField(jobLevelDb, taskIndex.toString(), state);
-        this.publishTaskStateFields(jobId, taskIndex, state);
-      }
-      const getTaskStateField = async () => {
+      const getState = async () => {
         return await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString());
+      }
+      const setTaskStateField: setStateFieldParams = async (fieldNameOrState: string | Record<string, any>, value?: any) => {
+        if (typeof fieldNameOrState === 'string') {
+          const state = await getState();
+          const updatedState = {
+            ...state,
+            [fieldNameOrState]: value,
+          };
+          await this.setLevelDbTaskStateField(jobLevelDb, taskIndex.toString(), updatedState);
+          this.publishTaskStateFields(jobId, taskIndex, { [fieldNameOrState]: value });
+          return;
+        }
+
+        this.warnDeprecatedOnce(
+          'setTaskStateField-object',
+          'BackgroundJobsPlugin: setTaskStateField(stateObject) is deprecated and will be removed soon. Use setTaskStateField(fieldName: string, value: any) instead. Use getState() when you need the full task state.',
+        );
+        await this.setLevelDbTaskStateField(jobLevelDb, taskIndex.toString(), fieldNameOrState);
+        this.publishTaskStateFields(jobId, taskIndex, fieldNameOrState);
+      }
+      const getTaskStateField: getStateFieldParams = async (fieldName?: string) => {
+        const state = await getState();
+        if (typeof fieldName === 'string') {
+          return state[fieldName];
+        }
+
+        this.warnDeprecatedOnce(
+          'getTaskStateField-no-args',
+          'BackgroundJobsPlugin: getTaskStateField() without a field name is deprecated and will be removed soon. Use getTaskStateField(fieldName: string) for one field, or getState() for the full task state.',
+        );
+        return state;
       }
 
       await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'IN_PROGRESS');
@@ -341,7 +385,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
       //handling the task 
       try {
-        await handleTask({ jobId, setTaskStateField, getTaskStateField });
+        await handleTask({ jobId, setTaskStateField, getTaskStateField, getState });
 
         //Set task status to completed in level db
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'DONE');
@@ -349,7 +393,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       } catch (error) {
         const errorMessage = error?.message || 'Unknown error';
         afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${errorMessage}`, );
-        await this.setJobField(jobId, 'error', errorMessage);
+        await this.setJobStateField(jobId, 'error', errorMessage);
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'FAILED');
         this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: "FAILED" });
         failedTasks++;
@@ -378,7 +422,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         [this.options.statusField]: 'DONE',
         [this.options.finishedAtField]: (new Date()).toISOString(),
       })
-      this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
+      this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
       this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
       await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
     } else if (failedTasks > 0) {
@@ -386,7 +430,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         [this.options.statusField]: 'DONE_WITH_ERRORS',
         [this.options.finishedAtField]: (new Date()).toISOString(),
       })
-      this.adminforth.websocket.publish('/background-jobs', { jobId, status: 'DONE_WITH_ERRORS' });
+      this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE_WITH_ERRORS' });
       this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
       await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
     }
@@ -407,7 +451,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await this.adminforth.resource(this.getResourceId()).update(jobId, {
       [this.options.progressField]: progress,
     })
-    this.adminforth.websocket.publish('/background-jobs', { jobId, progress });
+    this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, progress });
     return completedTasks;
   }
 
@@ -453,28 +497,41 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
   }
 
-  public async setJobField(jobId: string, key: string, value: any) {
+  public async setJobStateField(jobId: string, key: string, value: any) {
     const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
     const state = jobRecord[this.options.stateField];
-    const parsedState = JSON.parse(state);
-    parsedState[key] = value;
+    state[key] = value;
     await this.adminforth.resource(this.getResourceId()).update(jobId, {
-      [this.options.stateField]: JSON.stringify(parsedState),
+      [this.options.stateField]: state,
     });
     this.publishJobStateField(jobId, key, value);
   }
 
-  public async getJobField(jobId: string, key: string) {
+  public async getJobStateField(jobId: string, key: string) {
     const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
     const state = jobRecord[this.options.stateField];
-    const parsedState = JSON.parse(state);
-    return parsedState[key];
+    return state[key];
   }
 
   public async getJobState(jobId: string) {
     const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
-    const state = jobRecord[this.options.stateField];
-    return JSON.parse(state);
+    return jobRecord[this.options.stateField];
+  }
+
+  public async setJobField(jobId: string, key: string, value: any) {
+    this.warnDeprecatedOnce(
+      'setJobField',
+      'BackgroundJobsPlugin: setJobField(jobId, key, value) is deprecated and will be removed soon. Use setJobStateField(jobId, fieldName: string, value: any) instead.',
+    );
+    return this.setJobStateField(jobId, key, value);
+  }
+
+  public async getJobField(jobId: string, key: string) {
+    this.warnDeprecatedOnce(
+      'getJobField',
+      'BackgroundJobsPlugin: getJobField(jobId, key) is deprecated and will be removed soon. Use getJobStateField(jobId, fieldName: string) instead.',
+    );
+    return this.getJobStateField(jobId, key);
   }
 
   public async updateJobFieldsAtomically(jobId: string, updateFunction: () => Promise<void>) {
@@ -547,7 +604,6 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             createdAt: job[this.options.createdAtField],
             finishedAt: job[this.options.finishedAtField] || null,
             status: job[this.options.statusField],
-            state: JSON.parse(job[this.options.stateField]),
             progress: job[this.options.progressField],
             customComponent: this.jobCustomComponents[job[this.options.jobHandlerField]],
           }
@@ -572,7 +628,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           createdAt: job[this.options.createdAtField],
           finishedAt: job[this.options.finishedAtField] || null,
           status: job[this.options.statusField],
-          state: JSON.parse(job[this.options.stateField]),
+          state: job[this.options.stateField],
           progress: job[this.options.progressField],
           customComponent: this.jobCustomComponents[job[this.options.jobHandlerField]],
         };
@@ -596,7 +652,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             [this.options.statusField]: 'CANCELLED',
             [this.options.finishedAtField]: (new Date()).toISOString(),
           });
-          this.adminforth.websocket.publish('/background-jobs', { 
+          this.adminforth.websocket.publish('/background-jobs-job-update', { 
             jobId, 
             status: 'CANCELLED', 
           });

@@ -27,6 +27,7 @@ import { useBackgroundJobApi } from './useBackgroundJobApi';
 const jobStore = useBackgroundJobApi();
 
 const dialogRef = ref<any>(null);
+let unsubscribeJobUpdates: (() => void) | undefined;
 
 const props = defineProps<{
   meta: {
@@ -69,7 +70,7 @@ onMounted(() => {
   // @ts-ignore
   window.OpenJobInfoPopup = openJobInfo;
 
-  websocket.subscribe('/background-jobs', (data) => {
+  unsubscribeJobUpdates = websocket.subscribe('/background-jobs-job-update', (data) => {
     if (data.jobId === jobStore.currentJob?.id) {
       if (data.status) { 
         jobStore.updateCurrentJob({ status: data.status });
@@ -90,6 +91,6 @@ onBeforeUnmount(() => {
   // eslint-disable-next-line @typescript-eslint/ban-ts-comment
   // @ts-ignore
   if (window.OpenJobInfoPopup) delete window.OpenJobInfoPopup;
-  websocket.unsubscribe('/background-jobs');
+  unsubscribeJobUpdates?.();
 });
 </script>

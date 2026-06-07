@@ -3,7 +3,7 @@
     <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
       <div class="relative flex items-center justify-center" v-if="jobs.length > 0">
         <Tooltip>
-          <IconBriefcaseSolid class="w-7 h-7 text-lightNavbarIcons dark:text-darkNavbarIcons" />
+          <IconCheckCircleOutline class="w-7 h-7 text-lightNavbarIcons dark:text-darkNavbarIcons" />
           <template #tooltip>
             {{ t('All jobs completed') }}
           </template>
@@ -48,8 +48,8 @@
 <script setup lang="ts">
   import type { AdminUser } from 'adminforth';
   import { onMounted, onUnmounted, ref, computed } from 'vue';
-  import { IconCheckCircleOutline, IconBriefcaseSolid } from '@iconify-prerendered/vue-flowbite';
   import { Tooltip } from '@/afcl';
+  import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
   import type { IJob } from './utils';
@@ -69,6 +69,7 @@
   const isDropdownOpen = ref(false);
   const jobs = ref<IJob[]>([]);
   const dropdownRef = ref<HTMLElement | null>(null);
+  let unsubscribeJobUpdates: (() => void) | undefined;
 
   onClickOutside(dropdownRef, () => {
     isDropdownOpen.value = false;
@@ -85,7 +86,7 @@
 
 
   onMounted(async () => {
-    websocket.subscribe('/background-jobs', (data) => {
+    unsubscribeJobUpdates = websocket.subscribe('/background-jobs-job-update', (data) => {
       const jobIndex = jobs.value.findIndex(job => job.id === data.jobId);
       if (jobIndex !== -1) {
         if (data.status) {
@@ -130,7 +131,7 @@
 
 
   onUnmounted(() => {
-    websocket.unsubscribe('/background-jobs');
+    unsubscribeJobUpdates?.();
   });
 
 </script>

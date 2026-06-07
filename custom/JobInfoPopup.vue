@@ -69,7 +69,7 @@ import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils'
 import { useI18n } from 'vue-i18n';
 import StateToIcon from './StateToIcon.vue';
 import { useAdminforth } from '@/adminforth';
-import { onBeforeUnmount, ref, watch } from 'vue';
+import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import websocket from '@/websocket';
 import { useBackgroundJobApi } from './useBackgroundJobApi';
 
@@ -115,13 +115,11 @@ function createStateFieldSubscription(
   callback: (data: any) => void,
 ) {
   const paths = getUniqueFieldNames(fieldNames).map(pathFactory);
-  for (const path of paths) {
-    websocket.subscribe(path, callback);
-  }
+  const pathCleanups = paths.map((path) => websocket.subscribe(path, callback));
 
   const unsubscribe = () => {
-    for (const path of paths) {
-      websocket.unsubscribe(path);
+    for (const cleanup of pathCleanups) {
+      cleanup();
     }
     subscriptionCleanups.delete(unsubscribe);
   };
@@ -153,6 +151,50 @@ function handleTaskStateFieldUpdate(data: TaskStateFieldUpdate) {
     ...jobTasks.value[data.taskIndex].state,
     [data.fieldName]: data.value,
   };
+}
+
+function handleTaskStatusUpdate(data: { taskIndex: number; status: string }) {
+  if (!jobTasks.value[data.taskIndex]) {
+    return;
+  }
+
+  jobTasks.value[data.taskIndex].status = data.status;
+}
+
+function handleJobUpdate(data: {
+  jobId: string;
+  status?: IJob['status'];
+  progress?: string;
+  finishedAt?: Date;
+  state?: Record<string, any>;
+}) {
+  if (data.jobId !== props.job.id) {
+    return;
+  }
+
+  if (data.status) {
+    props.job.status = data.status;
+  }
+  if (data.progress !== undefined) {
+    props.job.progress = data.progress;
+  }
+  if (data.finishedAt) {
+    props.job.finishedAt = data.finishedAt;
+  }
+  if (data.state) {
+    props.job.state = {
+      ...props.job.state,
+      ...data.state,
+    };
+  }
+  if (jobStore.currentJob?.id === props.job.id) {
+    jobStore.updateCurrentJob({
+      status: props.job.status,
+      progress: props.job.progress,
+      finishedAt: props.job.finishedAt,
+      state: props.job.state,
+    });
+  }
 }
 
 function subscribeToJobStateFields(fieldNames: string[]) {
@@ -240,6 +282,13 @@ watch(
   },
   { immediate: true }
 );
+
+onMounted(() => {
+  const taskStatusPath = `/background-jobs-task-update/${props.job.id}`;
+  subscriptionCleanups.add(websocket.subscribe(taskStatusPath, handleTaskStatusUpdate));
+
+  subscriptionCleanups.add(websocket.subscribe('/background-jobs-job-update', handleJobUpdate));
+});
 
 onBeforeUnmount(() => {
   for (const unsubscribe of Array.from(subscriptionCleanups)) {
