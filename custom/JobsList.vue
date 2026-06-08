@@ -1,5 +1,5 @@
 <template>
-  <div class="w-1vw md:w-64 bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 rounded-md">
+  <div class="w-64 bg-white border border-gray-200 dark:bg-gray-800 dark:border-gray-600 rounded-md overflow-x-hidden">
     <Modal 
       ref="modalRef"
       class="p-4"
