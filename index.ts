@@ -196,6 +196,22 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return { failedTasks, succeededTasks };
   }
 
+  private async getLevelDbForTheJob(jobId: string): Promise<Level> {
+    const levelDbPath = `${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`;
+    let jobLevelDb: Level;
+    if (this.levelDbInstances[jobId]) {
+      jobLevelDb = this.levelDbInstances[jobId];
+    } else {
+      try {
+        jobLevelDb = new Level(levelDbPath, { valueEncoding: 'json' });
+        this.levelDbInstances[jobId] = jobLevelDb;
+      } catch (error) {
+        throw new Error(`Failed to access task storage for job with id ${jobId}.`);
+      }
+    }
+    return jobLevelDb;
+  }
+
   private publishJobStateField(jobId: string, fieldName: string, value: any) {
     this.adminforth.websocket.publish(`/background-jobs-state-update/${jobId}/${encodeStateFieldName(fieldName)}`, {
       jobId,
@@ -301,8 +317,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
 
     //create a level db instance for the job with name as jobId
-    const jobLevelDb = new Level(`${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`, { valueEncoding: 'json' });
-    this.levelDbInstances[jobId] = jobLevelDb;
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     await jobLevelDb.put('_meta:count', `${tasks.length}`);
     const limit2 = pLimit(parrallelLimit);
     const createTaskRecordsPromises = tasks.map((task, index) => {
@@ -315,6 +330,66 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return jobId;
   }
 
+  public async addNewTasksToExistingJob(
+    jobId: string,
+    tasks: taskType[],
+  ) {
+    const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+    if (!jobRecord) {
+      throw new Error(`Job with id ${jobId} not found.`);
+    }
+    const jobStatus = jobRecord[this.options.statusField];
+    if (jobStatus !== 'IN_PROGRESS') {
+      throw new Error(`Cannot add tasks to a job with status ${jobStatus}. Only jobs with status IN_PROGRESS can be added new tasks.`);
+    }
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
+    const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
+    const newTotalTasks = currentTotalTasks + tasks.length;
+    await jobLevelDb.put('_meta:count', `${newTotalTasks}`);
+    const createTaskRecordsPromises = tasks.map((task, index) => {
+      return this.createLevelDbTaskRecord(jobLevelDb, (currentTotalTasks + index).toString(), task.state);
+    });
+
+    await Promise.all(createTaskRecordsPromises);
+  }
+
+  public async deleteTasksFromExistingJob(
+    jobId: string,
+    taskIndex: number,
+  ): Promise<void> {
+    if (taskIndex < 0) {
+      throw new Error(`Invalid task index ${taskIndex}.`);
+    }
+    const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+    if (!jobRecord) {
+      throw new Error(`Job with id ${jobId} not found.`);
+    }
+    const jobStatus = jobRecord[this.options.statusField];
+    if (jobStatus !== 'IN_PROGRESS') {
+      throw new Error(`Cannot delete tasks from a job with status ${jobStatus}. Only jobs with status IN_PROGRESS can have tasks deleted.`);
+    }
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
+    const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
+    if (taskIndex >= currentTotalTasks) {
+      throw new Error(`Invalid task index ${taskIndex}.`);
+    }
+    await jobLevelDb.del(taskIndex.toString());
+    await jobLevelDb.put('_meta:count', `${currentTotalTasks - 1}`);
+  }
+
+  private async getUnfinishedTasksFromLevelDb(levelDb: Level): Promise<{ state: Record<string, any> }[]> {
+    const totalTasks = await this.getTotalTasksInLevelDb(levelDb);
+    const unfinishedTasks: { state: Record<string, any> }[] = [];
+    for (let taskIndex = 0; taskIndex < totalTasks; taskIndex++) {
+      const status = await this.getLevelDbTaskStatusField(levelDb, taskIndex.toString());
+      if (status === 'IN_PROGRESS' || status === 'SCHEDULED') {
+        const state = await this.getLevelDbTaskStateField(levelDb, taskIndex.toString());
+        unfinishedTasks.push({ state });
+      }
+    }
+    return unfinishedTasks;
+  }
+
   private async runProcessingTasks(
     tasks: taskType[],
     jobLevelDb: Level,
@@ -323,12 +398,13 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     parrallelLimit: number,
     onAllTasksDone?: onAllTasksDoneType,
   ) {
-    const totalTasks = tasks.length;
+    let totalTasks = tasks.length;
     let completedTasks = 0;
     let failedTasks = 0;
     let lastJobStatus = 'IN_PROGRESS';
 
-    const taskHandler = async ( taskIndex: number, task ) => {
+    const taskHandler = async ( taskIndex: number, task: taskType ) => {
+      totalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
       if (task.skip) {
         completedTasks = await this.handleFinishTask(completedTasks, totalTasks, jobId, true);
         return;
@@ -344,7 +420,12 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         afLogger.info(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
         return;
       }
-
+      // check if task is still exists in level db, because it can be deleted while processing
+      const taskStatus = await this.getLevelDbTaskStatusField(jobLevelDb, taskIndex.toString());
+      if (!taskStatus) {
+        afLogger.info(`Task ${taskIndex} of job ${jobId} was deleted. Skipping processing.`);
+        return;
+      }
       const getState = async () => {
         return await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString());
       }
@@ -417,22 +498,29 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
 
     await Promise.all(tasksToExecute);
-    if (lastJobStatus !== 'CANCELLED' && failedTasks === 0) {
-      await this.adminforth.resource(this.getResourceId()).update(jobId, {
-        [this.options.statusField]: 'DONE',
-        [this.options.finishedAtField]: (new Date()).toISOString(),
-      })
-      this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
-      this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
-      await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
-    } else if (failedTasks > 0) {
-      await this.adminforth.resource(this.getResourceId()).update(jobId, {
-        [this.options.statusField]: 'DONE_WITH_ERRORS',
-        [this.options.finishedAtField]: (new Date()).toISOString(),
-      })
-      this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE_WITH_ERRORS' });
-      this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
-      await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
+    const unfinishedTasks = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
+    if (unfinishedTasks.length > 0) {
+      const tasksToReprocess = tasks.map((t) => {t.skip =  true; t.state = t.state || {}; return t;});
+      tasksToReprocess.push(...unfinishedTasks);
+      await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, handleTask, parrallelLimit, onAllTasksDone);
+    } else {
+      if (lastJobStatus !== 'CANCELLED' && failedTasks === 0) {
+        await this.adminforth.resource(this.getResourceId()).update(jobId, {
+          [this.options.statusField]: 'DONE',
+          [this.options.finishedAtField]: (new Date()).toISOString(),
+        })
+        this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
+        this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
+        await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
+      } else if (failedTasks > 0) {
+        await this.adminforth.resource(this.getResourceId()).update(jobId, {
+          [this.options.statusField]: 'DONE_WITH_ERRORS',
+          [this.options.finishedAtField]: (new Date()).toISOString(),
+        })
+        this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE_WITH_ERRORS', finishedAt: (new Date()).toISOString() });
+        this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
+        await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
+      }
     }
   }
 
@@ -668,17 +756,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
       handler: async ({ body }) => {
         const { jobId, limit, offset } = body;
-        const levelDbPath = `${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`;
-        let jobLevelDb: Level;
-        if (this.levelDbInstances[jobId]) {
-          jobLevelDb = this.levelDbInstances[jobId];
-        } else {
-          try {
-            jobLevelDb = new Level(levelDbPath, { valueEncoding: 'json' });
-            this.levelDbInstances[jobId] = jobLevelDb;
-          } catch (error) {
-            return { ok: false, message: `Failed to access tasks for job with id ${jobId}.` };
-          }
+        const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId);
+        if (!jobLevelDb) {
+          return { ok: false, message: `Job with id ${jobId} not found.` };
         }
         const tasks = [];
         let taskIndex = 0 + offset;

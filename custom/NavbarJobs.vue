@@ -5,7 +5,7 @@
         <Tooltip>
           <IconCheckCircleOutline class="w-7 h-7 text-lightNavbarIcons dark:text-darkNavbarIcons" />
           <template #tooltip>
-            {{ t('All jobs completed') }}
+            {{ isAlLeastOneJobRunning ? t('Jobs in progress') : t('All jobs completed') }}
           </template>
         </Tooltip>
         <div
@@ -76,18 +76,18 @@
   });
 
   const isAlLeastOneJobRunning = computed(() => {
-    return jobs.value.some(job => job.status === 'IN_PROGRESS');
+    return jobs.value.some((job: IJob) => job.status === 'IN_PROGRESS');
   })
 
   const jobsCount = computed(() => {
-    return jobs.value.filter(job => job.status === 'IN_PROGRESS').length;
+    return jobs.value.filter((job: IJob) => job.status === 'IN_PROGRESS').length;
   })
 
 
 
   onMounted(async () => {
     unsubscribeJobUpdates = websocket.subscribe('/background-jobs-job-update', (data) => {
-      const jobIndex = jobs.value.findIndex(job => job.id === data.jobId);
+      const jobIndex = jobs.value.findIndex((job: IJob) => job.id === data.jobId);
       if (jobIndex !== -1) {
         if (data.status) {
           jobs.value[jobIndex].status = data.status;
