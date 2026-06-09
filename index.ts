@@ -196,7 +196,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return { failedTasks, succeededTasks };
   }
 
-  private async getLevelDb(jobId: string): Promise<Level> {
+  private async getLevelDbForTheJob(jobId: string): Promise<Level> {
     const levelDbPath = `${this.options.levelDbPath || './background-jobs-dbs/'}job_${jobId}`;
     let jobLevelDb: Level;
     if (this.levelDbInstances[jobId]) {
@@ -317,7 +317,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
 
     //create a level db instance for the job with name as jobId
-    const jobLevelDb = await this.getLevelDb(jobId);
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     await jobLevelDb.put('_meta:count', `${tasks.length}`);
     const limit2 = pLimit(parrallelLimit);
     const createTaskRecordsPromises = tasks.map((task, index) => {
@@ -342,7 +342,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     if (jobStatus !== 'IN_PROGRESS') {
       throw new Error(`Cannot add tasks to a job with status ${jobStatus}. Only jobs with status IN_PROGRESS can be added new tasks.`);
     }
-    const jobLevelDb = await this.getLevelDb(jobId);
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
     const newTotalTasks = currentTotalTasks + tasks.length;
     await jobLevelDb.put('_meta:count', `${newTotalTasks}`);
@@ -368,7 +368,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     if (jobStatus !== 'IN_PROGRESS') {
       throw new Error(`Cannot delete tasks from a job with status ${jobStatus}. Only jobs with status IN_PROGRESS can have tasks deleted.`);
     }
-    const jobLevelDb = await this.getLevelDb(jobId);
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
     if (taskIndex >= currentTotalTasks) {
       throw new Error(`Invalid task index ${taskIndex}.`);
