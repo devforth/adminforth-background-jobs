@@ -756,7 +756,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
       handler: async ({ body }) => {
         const { jobId, limit, offset } = body;
-        const jobLevelDb: Level = await this.getLevelDb(jobId);
+        const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId);
         if (!jobLevelDb) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
