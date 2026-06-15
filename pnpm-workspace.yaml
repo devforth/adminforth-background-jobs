@@ -1,0 +1,5 @@
+allowBuilds:
+  adminforth: true
+  classic-level: true
+minimumReleaseAgeExclude:
+  - adminforth@3.0.1
