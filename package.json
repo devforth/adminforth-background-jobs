@@ -26,7 +26,7 @@
   "description": "Background jobs plugin for AdminForth to run and manage long tasks from resources",
   "devDependencies": {
     "@types/node": "latest",
-    "adminforth": "^3.1.1",
+    "adminforth": "^3.1.0",
     "semantic-release": "^24.2.1",
     "semantic-release-slack-bot": "^4.0.2",
     "typescript": "^5.7.3",
@@ -57,6 +57,6 @@
     "p-limit": "^7.3.0"
   },
   "peerDependencies": {
-    "adminforth": "^3.1.1"
+    "adminforth": "^3.1.0"
   }
 }
