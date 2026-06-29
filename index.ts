@@ -787,7 +787,13 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       path: `/plugin/${this.pluginInstanceId}/cancel-job`,
       handler: async ({ body }) => {
         const jobId = body.jobId;
+        if (!jobId) {
+          return { ok: false, message: 'Job id is required.' };
+        }
         const currentJob = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+        if (!currentJob) {
+          return { ok: false, message: `Job with id ${jobId} not found.` };
+        }
         const oldStatus = currentJob[this.options.statusField];
         if (oldStatus === 'DONE' || oldStatus === 'DONE_WITH_ERRORS' || oldStatus === 'CANCELLED') {
           return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
