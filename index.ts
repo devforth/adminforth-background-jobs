@@ -1,4 +1,4 @@
-import { AdminForthPlugin, Filters, Sorts } from "adminforth";
+import { AdminForthPlugin, parseBody, Filters, Sorts } from "adminforth";
 import type { IAdminForth, IHttpServer, AdminForthResource, AdminUser, AdminForthComponentDeclarationFull } from "adminforth";
 import type { PluginOptions } from './types.js';
 import { afLogger } from "adminforth";
@@ -63,22 +63,6 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     super(options, import.meta.url);
     this.options = options;
     this.shouldHaveSingleInstancePerWholeApp = () => true;
-  }
-
-  private parseBody<T>(
-    schema: z.ZodType<T>,
-    body: unknown,
-    response: { setStatus: (code: number, message: string) => void },
-  ): { ok: true; data: T } | { ok: false; error: { error: string; details: unknown } } {
-    const parsed = schema.safeParse(body ?? {});
-    if (!parsed.success) {
-      response.setStatus(400, '');
-      return {
-        ok: false,
-        error: { error: 'Request body validation failed', details: parsed.error.issues },
-      };
-    }
-    return { ok: true, data: parsed.data };
   }
 
   private getResourcePk(): string {
@@ -788,7 +772,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       method: 'POST',
       path: `/plugin/get-background-job-info`,
       handler: async ({ adminUser, body, response }) => {
-        const parsed = this.parseBody(jobIdBodySchema, body, response);
+        const parsed = parseBody(jobIdBodySchema, body, response);
         if ('error' in parsed) return parsed.error;
         const data = parsed.data;
         const jobId = data.jobId;
@@ -816,7 +800,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/cancel-job`,
       handler: async ({ body, response }) => {
-        const parsed = this.parseBody(jobIdBodySchema, body, response);
+        const parsed = parseBody(jobIdBodySchema, body, response);
         if ('error' in parsed) return parsed.error;
         const data = parsed.data;
         const jobId = data.jobId;
@@ -851,7 +835,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
       handler: async ({ body, response }) => {
-        const parsed = this.parseBody(getTasksBodySchema, body, response);
+        const parsed = parseBody(getTasksBodySchema, body, response);
         if ('error' in parsed) return parsed.error;
         const data = parsed.data;
         const { jobId, limit, offset } = data;
