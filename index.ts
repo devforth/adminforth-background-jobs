@@ -6,6 +6,17 @@ import pLimit from 'p-limit';
 import { Level } from 'level';
 import fs from 'fs/promises';
 import { Mutex } from 'async-mutex';
+import { z } from "zod";
+
+const jobIdBodySchema = z.object({
+  jobId: z.union([z.string(), z.number()]),
+}).strict();
+
+const getTasksBodySchema = z.object({
+  jobId: z.union([z.string(), z.number()]),
+  limit: z.number(),
+  offset: z.number(),
+}).strict();
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
 type setStateFieldParams = {
@@ -52,6 +63,19 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     super(options, import.meta.url);
     this.options = options;
     this.shouldHaveSingleInstancePerWholeApp = () => true;
+  }
+
+  private parseBody<T>(
+    schema: z.ZodType<T>,
+    body: unknown,
+    response: { setStatus: (code: number, message: string) => void },
+  ): T | null {
+    const parsed = schema.safeParse(body ?? {});
+    if (!parsed.success) {
+      response.setStatus(422, parsed.error.message);
+      return null;
+    }
+    return parsed.data;
   }
 
   private getResourcePk(): string {
@@ -760,8 +784,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/get-background-job-info`,
-      handler: async ({ adminUser, body }) => {
-        const jobId = body.jobId;
+      handler: async ({ adminUser, body, response }) => {
+        const data = this.parseBody(jobIdBodySchema, body, response);
+        if (!data) return;
+        const jobId = data.jobId;
 
         const job = await this.adminforth.resource(this.resourceConfig.resourceId).get(Filters.EQ(this.getResourcePk(), jobId));
         if (!job) {
@@ -785,8 +811,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/cancel-job`,
-      handler: async ({ body }) => {
-        const jobId = body.jobId;
+      handler: async ({ body, response }) => {
+        const data = this.parseBody(jobIdBodySchema, body, response);
+        if (!data) return;
+        const jobId = data.jobId;
         if (!jobId) {
           return { ok: false, message: 'Job id is required.' };
         }
@@ -817,9 +845,11 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
-      handler: async ({ body }) => {
-        const { jobId, limit, offset } = body;
-        const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId);
+      handler: async ({ body, response }) => {
+        const data = this.parseBody(getTasksBodySchema, body, response);
+        if (!data) return;
+        const { jobId, limit, offset } = data;
+        const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId as string);
         if (!jobLevelDb) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
