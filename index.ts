@@ -539,21 +539,21 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
 
     await Promise.all(tasksToExecute);
+    if (lastJobStatus === 'CANCELLED') {
+      this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
+      return;
+    }
+    const jobStatusAfterExecution = await this.getLastJobStatus(jobId);
+    if (jobStatusAfterExecution === 'CANCELLED') {
+      this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
+      return;
+    }
+
     const unfinishedTasks = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
     if (unfinishedTasks.length > 0) {
       const tasksToReprocess = this.buildTasksToReprocess(tasks, unfinishedTasks);
       await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, handleTask, parrallelLimit, onAllTasksDone, beforeJobFinish, finishAttemptNumber);
     } else {
-      if (lastJobStatus === 'CANCELLED') {
-        return;
-      }
-
-      const currentJobStatus = await this.getLastJobStatus(jobId);
-      if (currentJobStatus === 'CANCELLED') {
-        this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
-        return;
-      }
-
       const nextFinishAttemptNumber = finishAttemptNumber + 1;
       await this.triggerBeforeJobFinish(beforeJobFinish, jobLevelDb, jobId, nextFinishAttemptNumber);
 
