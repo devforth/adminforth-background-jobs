@@ -1,4 +1,4 @@
-import { AdminForthPlugin, parseBody, Filters, Sorts } from "adminforth";
+import { AdminForthPlugin, Filters, Sorts } from "adminforth";
 import type { IAdminForth, IHttpServer, AdminForthResource, AdminUser, AdminForthComponentDeclarationFull } from "adminforth";
 import type { PluginOptions } from './types.js';
 import { afLogger } from "adminforth";
@@ -771,10 +771,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/get-background-job-info`,
-      handler: async ({ adminUser, body, response }) => {
-        const parsed = parseBody(jobIdBodySchema, body, response);
-        if ('error' in parsed) return parsed.error;
-        const data = parsed.data;
+      request_schema: jobIdBodySchema,
+      handler: async ({ adminUser, body }) => {
+        const data = body as z.infer<typeof jobIdBodySchema>;
         const jobId = data.jobId;
 
         const job = await this.adminforth.resource(this.resourceConfig.resourceId).get(Filters.EQ(this.getResourcePk(), jobId));
@@ -799,14 +798,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/cancel-job`,
-      handler: async ({ body, response }) => {
-        const parsed = parseBody(jobIdBodySchema, body, response);
-        if ('error' in parsed) return parsed.error;
-        const data = parsed.data;
+      request_schema: jobIdBodySchema,
+      handler: async ({ body }) => {
+        const data = body as z.infer<typeof jobIdBodySchema>;
         const jobId = data.jobId;
-        if (!jobId) {
-          return { ok: false, message: 'Job id is required.' };
-        }
         const currentJob = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
         if (!currentJob) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
@@ -834,10 +829,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
-      handler: async ({ body, response }) => {
-        const parsed = parseBody(getTasksBodySchema, body, response);
-        if ('error' in parsed) return parsed.error;
-        const data = parsed.data;
+      request_schema: getTasksBodySchema,
+      handler: async ({ body }) => {
+        const data = body as z.infer<typeof getTasksBodySchema>;
         const { jobId, limit, offset } = data;
         const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId as string);
         if (!jobLevelDb) {
