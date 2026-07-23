@@ -153,12 +153,18 @@ function handleTaskStateFieldUpdate(data: TaskStateFieldUpdate) {
   };
 }
 
-function handleTaskStatusUpdate(data: { taskIndex: number; status: string }) {
+function handleTaskStatusUpdate(data: { taskIndex: number; status: string; error?: string }) {
   if (!jobTasks.value[data.taskIndex]) {
     return;
   }
 
   jobTasks.value[data.taskIndex].status = data.status;
+  if (data.error !== undefined) {
+    jobTasks.value[data.taskIndex].state = {
+      ...jobTasks.value[data.taskIndex].state,
+      error: data.error,
+    };
+  }
 }
 
 function handleJobUpdate(data: {

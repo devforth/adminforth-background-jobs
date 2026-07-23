@@ -517,8 +517,11 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         const errorMessage = error?.message || 'Unknown error';
         afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${errorMessage}`, );
         await this.setJobStateField(jobId, 'error', errorMessage);
+        // persist the error inside the task state so it is returned when tasks are fetched later
+        const taskState = await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString());
+        await this.setLevelDbTaskStateField(jobLevelDb, taskIndex.toString(), { ...taskState, error: errorMessage });
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'FAILED');
-        this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: "FAILED" });
+        this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: "FAILED", error: errorMessage });
         return;
       } finally {
         //Update progress
@@ -584,7 +587,8 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           [this.options.statusField]: 'DONE_WITH_ERRORS',
           [this.options.finishedAtField]: (new Date()).toISOString(),
         })
-        this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE_WITH_ERRORS', finishedAt: (new Date()).toISOString() });
+        const jobError = await this.getJobStateField(jobId, 'error');
+        this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE_WITH_ERRORS', finishedAt: (new Date()).toISOString(), error: jobError });
         this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
         await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
       }

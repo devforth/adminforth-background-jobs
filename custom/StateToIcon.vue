@@ -26,7 +26,9 @@
   <Tooltip v-else-if="status === 'FAILED'">
     <IconCloseCircleOutline class="w-6 h-6 ml-2 text-red-500" />
     <template #tooltip>
-      {{ t('Failed') }}
+      <p class="max-w-64">
+        {{ t('Failed') }}<template v-if="error">: {{ error }}</template>
+      </p>
     </template>
   </Tooltip>
   <Tooltip v-else-if="status === 'SCHEDULED'">
@@ -49,5 +51,6 @@
   const props = defineProps<{
     job?: IJob;
     status?: 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS';
+    error?: string;
   }>();
 </script>

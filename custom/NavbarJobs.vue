@@ -56,8 +56,10 @@
   import { callAdminForthApi } from '@/utils';
   import websocket from '@/websocket';
   import { onClickOutside } from '@vueuse/core'
+  import { useAdminforth } from '@/adminforth';
 
   const { t } = useI18n();
+  const adminforth = useAdminforth();
 
   const props = defineProps<{
     meta: {
@@ -87,6 +89,12 @@
 
   onMounted(async () => {
     unsubscribeJobUpdates = websocket.subscribe('/background-jobs-job-update', (data) => {
+      if (data.status === 'DONE_WITH_ERRORS' && data.error) {
+        adminforth.alert({
+          message: data.error,
+          variant: 'danger',
+        });
+      }
       const jobIndex = jobs.value.findIndex((job: IJob) => job.id === data.jobId);
       if (jobIndex !== -1) {
         if (data.status) {
