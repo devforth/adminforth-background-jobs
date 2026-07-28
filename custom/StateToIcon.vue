@@ -26,7 +26,7 @@
   <Tooltip v-else-if="status === 'FAILED'">
     <IconCloseCircleOutline class="w-6 h-6 ml-2 text-red-500" />
     <template #tooltip>
-      <p class="max-w-64">
+      <p class="max-w-64 break-all">
         {{ t('Failed') }}<template v-if="error">: {{ error }}</template>
       </p>
     </template>
