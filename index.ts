@@ -446,10 +446,15 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     let completedTasks = 0;
     let lastJobStatus = 'IN_PROGRESS';
 
+    const progressMutex = new Mutex();
+    const finishTask = (wasTaskSkipped: boolean = false) => progressMutex.runExclusive(async () => {
+      completedTasks = await this.handleFinishTask(completedTasks, totalTasks, jobId, wasTaskSkipped);
+    });
+
     const taskHandler = async ( taskIndex: number, task: taskType ) => {
       totalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
       if (task.skip) {
-        completedTasks = await this.handleFinishTask(completedTasks, totalTasks, jobId, true);
+        await finishTask(true);
         return;
       }
       if (lastJobStatus === 'CANCELLED') {
@@ -533,7 +538,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           return;
         }
 
-        completedTasks = await this.handleFinishTask(completedTasks, totalTasks, jobId);        
+        await finishTask();
       }
     }
 
