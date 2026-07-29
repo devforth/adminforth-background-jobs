@@ -16,6 +16,7 @@ const getTasksBodySchema = z.object({
   jobId: z.union([z.string(), z.number()]),
   limit: z.number(),
   offset: z.number(),
+  fieldsToReturn: z.array(z.string()).optional(),
 }).strict();
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
@@ -836,7 +837,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       request_schema: getTasksBodySchema,
       handler: async ({ body }) => {
         const data = body as z.infer<typeof getTasksBodySchema>;
-        const { jobId, limit, offset } = data;
+        const { jobId, limit, offset, fieldsToReturn } = data;
         const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId as string);
         if (!jobLevelDb) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
@@ -858,6 +859,13 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             afLogger.error(`Error parsing task data for task ${taskIndex} of job ${jobId}: ${error}`);
             taskIndex++;
             continue;
+          }
+          if (fieldsToReturn && fieldsToReturn.length > 0) {
+            const filteredState: Record<string, any> = {};
+            for (const field of fieldsToReturn) {
+              filteredState[field] = parsedTaskData.state[field];
+            }
+            parsedTaskData.state = filteredState;
           }
           tasks.push(parsedTaskData);
           taskIndex++;

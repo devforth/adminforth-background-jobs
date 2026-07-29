@@ -248,7 +248,7 @@ async function cancelJob() {
 
 
 
-async function getJobTasks(limit: number = 10, offset: number = 0): Promise<JobTask[]> {
+async function getJobTasks(limit: number = 10, offset: number = 0, fieldsToReturn?: string[]): Promise<JobTask[]> {
   try {
     const res = await callAdminForthApi({
       path: `/plugin/${props.meta.pluginInstanceId}/get-tasks`,
@@ -257,6 +257,7 @@ async function getJobTasks(limit: number = 10, offset: number = 0): Promise<JobT
         jobId: props.job.id,
         limit,
         offset,
+        fieldsToReturn,
       },
     });
     if (res.ok) {
