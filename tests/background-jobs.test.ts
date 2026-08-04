@@ -21,9 +21,11 @@ const adminforthMock = vi.hoisted(() => {
   return {
     AdminForthPlugin,
     Filters: {
+      AND: (...subFilters: any[]) => ({ operator: 'AND', subFilters }),
       EQ: (field: string, value: any) => ({ field, operator: 'EQ', value }),
     },
     Sorts: {
+      ASC: (field: string) => ({ direction: 'ASC', field }),
       DESC: (field: string) => ({ direction: 'DESC', field }),
     },
     afLogger: {
@@ -100,12 +102,14 @@ const resourceConfig = {
 };
 
 type MockFilter = {
-  field: string;
-  value: any;
+  field?: string;
+  operator?: string;
+  subFilters?: MockFilter[];
+  value?: any;
 };
 
 type MockSort = {
-  direction: 'DESC';
+  direction: 'ASC' | 'DESC';
   field: string;
 };
 
@@ -113,11 +117,14 @@ function clone<T>(value: T): T {
   return value == null ? value : JSON.parse(JSON.stringify(value));
 }
 
-function matchesFilter(record: Record<string, any>, filter?: MockFilter) {
+function matchesFilter(record: Record<string, any>, filter?: MockFilter): boolean {
   if (!filter) {
     return true;
   }
-  return record[filter.field] === filter.value;
+  if (filter.operator === 'AND') {
+    return (filter.subFilters || []).every((subFilter) => matchesFilter(record, subFilter));
+  }
+  return record[filter.field!] === filter.value;
 }
 
 function createMockResource(initialRecords: Record<string, any>[] = []) {
@@ -149,6 +156,8 @@ function createMockResource(initialRecords: Record<string, any>[] = []) {
 
       if (sort?.direction === 'DESC') {
         filteredRecords = filteredRecords.sort((left, right) => String(right[sort.field]).localeCompare(String(left[sort.field])));
+      } else if (sort?.direction === 'ASC') {
+        filteredRecords = filteredRecords.sort((left, right) => String(left[sort.field]).localeCompare(String(right[sort.field])));
       }
 
       const end = limit == null ? undefined : offset + limit;
@@ -238,6 +247,41 @@ async function eventually(assertion: () => void | Promise<void>, timeoutMs = 100
   if (lastError) {
     throw lastError;
   }
+}
+
+function createDeferred() {
+  let resolve!: () => void;
+  const promise = new Promise<void>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
+}
+
+/**
+ * Task handler which reports every started task and blocks until the test releases it by task name.
+ */
+function createGatedHandler() {
+  const startedTasks: string[] = [];
+  const gates = new Map<string, ReturnType<typeof createDeferred>>();
+
+  const gateOf = (taskName: string) => {
+    if (!gates.has(taskName)) {
+      gates.set(taskName, createDeferred());
+    }
+    return gates.get(taskName)!;
+  };
+
+  const handler = vi.fn(async ({ getTaskStateField }: any) => {
+    const taskName = await getTaskStateField('name');
+    startedTasks.push(taskName);
+    await gateOf(taskName).promise;
+  });
+
+  return {
+    handler,
+    release: (taskName: string) => gateOf(taskName).resolve(),
+    startedTasks,
+  };
 }
 
 function seedJob(overrides: Record<string, any> = {}) {
@@ -376,7 +420,7 @@ describe('BackgroundJobsPlugin job processing', () => {
 
     expect(handler).toHaveBeenCalledTimes(2);
     expect(readTask(jobId, 0)).toEqual({ state: { input: 1, result: 2 }, status: 'DONE' });
-    expect(readTask(jobId, 1)).toEqual({ state: { input: 2 }, status: 'FAILED' });
+    expect(readTask(jobId, 1)).toEqual({ state: { error: 'task exploded', input: 2 }, status: 'FAILED' });
     expect(resource.records.get(jobId)).toMatchObject({
       state: { error: 'task exploded' },
       status: 'DONE_WITH_ERRORS',
@@ -387,6 +431,7 @@ describe('BackgroundJobsPlugin job processing', () => {
       value: 'task exploded',
     });
     expect(adminforth.websocket.publish).toHaveBeenCalledWith('/background-jobs-task-update/job-1', {
+      error: 'task exploded',
       status: 'FAILED',
       taskIndex: 1,
     });
@@ -441,6 +486,348 @@ describe('BackgroundJobsPlugin job processing', () => {
       plugin.startNewJob('No handler', { pk: 'user-1' } as any, [{ state: {} }], 'missing-handler'),
     ).rejects.toThrow('No handler registered for jobHandler missing-handler');
     expect(resource.create).not.toHaveBeenCalled();
+  });
+});
+
+describe('BackgroundJobsPlugin queued jobs', () => {
+  beforeEach(() => {
+    levelMock.Level.stores.clear();
+  });
+
+  it('creates a queued job with queued tasks and starts it while the handler has a free slot', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'queued', parallelLimit: 1 });
+
+    const jobId = await plugin.queueNewJob('Queued job', { pk: 'user-1' } as any, [{ state: { name: 'only' } }], 'queued');
+
+    expect(resource.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'QUEUED' }));
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith(
+      '/background-jobs-job-update',
+      expect.objectContaining({ jobId, name: 'Queued job', progress: 0, status: 'QUEUED' }),
+    );
+    // nothing else of that handler is running, so the queue starts the job right away
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith(
+      '/background-jobs-job-update',
+      expect.objectContaining({ createdAt: expect.any(String), jobId, name: 'Queued job', status: 'IN_PROGRESS' }),
+    );
+
+    await eventually(() => expect(startedTasks).toEqual(['only']));
+    release('only');
+
+    await eventually(() => {
+      expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' });
+    });
+  });
+
+  it('starts a job right away with startNewJob while the queue has a free slot', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'auto', parallelLimit: 1 });
+
+    const jobId = await plugin.startNewJob('Report', { pk: 'user-1' } as any, [{ state: { name: 'only' } }], 'auto');
+
+    expect(resource.create).toHaveBeenCalledWith(expect.objectContaining({ status: 'IN_PROGRESS' }));
+    await eventually(() => expect(startedTasks).toEqual(['only']));
+
+    release('only');
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' }));
+  });
+
+  it('queues a job started with startNewJob when the concurrency limit is already reached', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'auto-queue', parallelLimit: 1 });
+
+    const runningJobId = await plugin.startNewJob('Report', { pk: 'user-1' } as any, [{ state: { name: 'running' } }], 'auto-queue');
+    await eventually(() => expect(startedTasks).toEqual(['running']));
+
+    // the only slot of the queue is taken, so the next job of the same name is queued instead of started
+    const queuedJobId = await plugin.startNewJob('Report', { pk: 'user-1' } as any, [{ state: { name: 'queued' } }], 'auto-queue');
+    expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'QUEUED' });
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith(
+      '/background-jobs-job-update',
+      expect.objectContaining({ jobId: queuedJobId, status: 'QUEUED' }),
+    );
+    expect(startedTasks).toEqual(['running']);
+
+    // a different job name has its own free slot, so it is not affected by the busy queue
+    const otherNameJobId = await plugin.startNewJob('Other report', { pk: 'user-1' } as any, [{ state: { name: 'other' } }], 'auto-queue');
+    expect(resource.records.get(otherNameJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    await eventually(() => expect(startedTasks).toContain('other'));
+
+    release('running');
+    await eventually(() => expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'IN_PROGRESS' }));
+    expect(resource.records.get(runningJobId)).toMatchObject({ status: 'DONE' });
+
+    release('queued');
+    release('other');
+    await eventually(() => {
+      expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'DONE' });
+      expect(resource.records.get(otherNameJobId)).toMatchObject({ status: 'DONE' });
+    });
+  });
+
+  it('keeps FIFO order when startNewJob is called while jobs are already queued', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'fifo-mixed', parallelLimit: 1 });
+
+    const runningJobId = await plugin.startNewJob('Batch', { pk: 'user-1' } as any, [{ state: { name: 'running' } }], 'fifo-mixed');
+    await eventually(() => expect(startedTasks).toEqual(['running']));
+
+    const queuedFirstJobId = await plugin.queueNewJob('Batch', { pk: 'user-1' } as any, [{ state: { name: 'queued-first' } }], 'fifo-mixed');
+    const queuedSecondJobId = await plugin.startNewJob('Batch', { pk: 'user-1' } as any, [{ state: { name: 'queued-second' } }], 'fifo-mixed');
+
+    expect(resource.records.get(queuedFirstJobId)).toMatchObject({ status: 'QUEUED' });
+    expect(resource.records.get(queuedSecondJobId)).toMatchObject({ status: 'QUEUED' });
+
+    // the job queued earlier must run first, even though the later one came through startNewJob
+    release('running');
+    await eventually(() => expect(startedTasks).toEqual(['running', 'queued-first']));
+    expect(resource.records.get(queuedSecondJobId)).toMatchObject({ status: 'QUEUED' });
+
+    release('queued-first');
+    await eventually(() => expect(startedTasks).toEqual(['running', 'queued-first', 'queued-second']));
+
+    release('queued-second');
+    await eventually(() => expect(resource.records.get(queuedSecondJobId)).toMatchObject({ status: 'DONE' }));
+    expect(resource.records.get(runningJobId)).toMatchObject({ status: 'DONE' });
+  });
+
+  it('keeps a queued job untouched with autoStart disabled until startNextQueuedJob is called', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'manual', parallelLimit: 1 });
+
+    const jobId = await plugin.queueNewJob(
+      'Manual job',
+      { pk: 'user-1' } as any,
+      [{ state: { name: 'manual-task' } }],
+      'manual',
+      {},
+      { autoStart: false },
+    );
+
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'QUEUED' });
+    expect(readTask(jobId, 0)).toEqual({ state: { name: 'manual-task' }, status: 'SCHEDULED' });
+    expect(handler).not.toHaveBeenCalled();
+
+    await expect(plugin.startNextQueuedJob('manual', 'Manual job')).resolves.toBe(jobId);
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'IN_PROGRESS' });
+
+    await eventually(() => expect(startedTasks).toEqual(['manual-task']));
+    release('manual-task');
+
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' }));
+    // queue is empty now
+    await expect(plugin.startNextQueuedJob('manual', 'Manual job')).resolves.toBeNull();
+  });
+
+  it('runs one job per job name at a time and starts the oldest queued job when the running one finishes', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'fifo', parallelLimit: 1 });
+
+    const firstJobId = await plugin.queueNewJob('Export', { pk: 'user-1' } as any, [{ state: { name: 'first' } }], 'fifo');
+    const secondJobId = await plugin.queueNewJob('Export', { pk: 'user-1' } as any, [{ state: { name: 'second' } }], 'fifo');
+    const thirdJobId = await plugin.queueNewJob('Export', { pk: 'user-1' } as any, [{ state: { name: 'third' } }], 'fifo');
+
+    await eventually(() => expect(startedTasks).toEqual(['first']));
+    expect(resource.records.get(firstJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get(secondJobId)).toMatchObject({ status: 'QUEUED' });
+    expect(resource.records.get(thirdJobId)).toMatchObject({ status: 'QUEUED' });
+
+    release('first');
+    await eventually(() => expect(startedTasks).toEqual(['first', 'second']));
+    expect(resource.records.get(firstJobId)).toMatchObject({ status: 'DONE' });
+    expect(resource.records.get(secondJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get(thirdJobId)).toMatchObject({ status: 'QUEUED' });
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith(
+      '/background-jobs-job-update',
+      expect.objectContaining({ jobId: secondJobId, status: 'IN_PROGRESS' }),
+    );
+
+    release('second');
+    await eventually(() => expect(startedTasks).toEqual(['first', 'second', 'third']));
+    expect(resource.records.get(thirdJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+
+    release('third');
+    await eventually(() => expect(resource.records.get(thirdJobId)).toMatchObject({ status: 'DONE' }));
+  });
+
+  it('runs as many jobs of one job name in parallel as concurrencyLimit allows', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ concurrencyLimit: 2, handler, jobHandlerName: 'two-at-a-time', parallelLimit: 1 });
+
+    const jobIds: string[] = [];
+    for (const taskName of ['first', 'second', 'third']) {
+      jobIds.push(
+        await plugin.queueNewJob('Import', { pk: 'user-1' } as any, [{ state: { name: taskName } }], 'two-at-a-time'),
+      );
+    }
+
+    await eventually(() => expect(startedTasks).toEqual(['first', 'second']));
+    expect(resource.records.get(jobIds[0])).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get(jobIds[1])).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get(jobIds[2])).toMatchObject({ status: 'QUEUED' });
+
+    release('first');
+    await eventually(() => expect(startedTasks).toEqual(['first', 'second', 'third']));
+    expect(resource.records.get(jobIds[2])).toMatchObject({ status: 'IN_PROGRESS' });
+
+    release('second');
+    release('third');
+    await eventually(() => {
+      for (const jobId of jobIds) {
+        expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' });
+      }
+    });
+  });
+
+  it('queues jobs of one handler per job name, so different names do not wait for each other', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'per-name', parallelLimit: 1 });
+
+    const firstUsersJobId = await plugin.queueNewJob('Export users', { pk: 'user-1' } as any, [{ state: { name: 'users-1' } }], 'per-name');
+    const secondUsersJobId = await plugin.queueNewJob('Export users', { pk: 'user-1' } as any, [{ state: { name: 'users-2' } }], 'per-name');
+    const ordersJobId = await plugin.queueNewJob('Export orders', { pk: 'user-1' } as any, [{ state: { name: 'orders-1' } }], 'per-name');
+
+    // both job names run at the same time, the second job of the same name waits for its own queue
+    await eventually(() => expect(startedTasks.slice().sort()).toEqual(['orders-1', 'users-1']));
+    expect(resource.records.get(firstUsersJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get(ordersJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get(secondUsersJobId)).toMatchObject({ status: 'QUEUED' });
+
+    // finishing the orders job must not touch the queue of the other job name
+    release('orders-1');
+    await eventually(() => expect(resource.records.get(ordersJobId)).toMatchObject({ status: 'DONE' }));
+    expect(resource.records.get(secondUsersJobId)).toMatchObject({ status: 'QUEUED' });
+
+    release('users-1');
+    await eventually(() => expect(resource.records.get(secondUsersJobId)).toMatchObject({ status: 'IN_PROGRESS' }));
+    expect(startedTasks).toContain('users-2');
+
+    release('users-2');
+    await eventually(() => expect(resource.records.get(secondUsersJobId)).toMatchObject({ status: 'DONE' }));
+  });
+
+  it('starts the next queued job when the running one is cancelled', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+    const endpoints = new Map<string, any>();
+    const server = {
+      endpoint: vi.fn((definition: any) => {
+        endpoints.set(`${definition.method} ${definition.path}`, definition.handler);
+      }),
+    };
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'cancellable', parallelLimit: 1 });
+    plugin.setupEndpoints(server as any);
+
+    const runningJobId = await plugin.queueNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'running' } }], 'cancellable');
+    const queuedJobId = await plugin.queueNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'waiting' } }], 'cancellable');
+
+    await eventually(() => expect(startedTasks).toEqual(['running']));
+
+    await expect(
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({ body: { jobId: runningJobId } }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(resource.records.get(runningJobId)).toMatchObject({ status: 'CANCELLED' });
+    expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+
+    release('running');
+    release('waiting');
+    await eventually(() => expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'DONE' }));
+  });
+
+  it('cancels a job which is still queued', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, startedTasks } = createGatedHandler();
+    const endpoints = new Map<string, any>();
+    const server = {
+      endpoint: vi.fn((definition: any) => {
+        endpoints.set(`${definition.method} ${definition.path}`, definition.handler);
+      }),
+    };
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'cancel-queued', parallelLimit: 1 });
+    plugin.setupEndpoints(server as any);
+
+    const runningJobId = await plugin.queueNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'running' } }], 'cancel-queued');
+    const queuedJobId = await plugin.queueNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'waiting' } }], 'cancel-queued');
+
+    await eventually(() => expect(startedTasks).toEqual(['running']));
+
+    await expect(
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({ body: { jobId: queuedJobId } }),
+    ).resolves.toEqual({ ok: true });
+
+    expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'CANCELLED' });
+    expect(resource.records.get(runningJobId)).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(startedTasks).toEqual(['running']);
+  });
+
+  it('resumes active jobs on startup and starts queued jobs only for handlers without an active job', async () => {
+    const { plugin, resource } = await createHarness([
+      seedJob({ createdAt: '2026-06-11T00:00:01.000Z', id: 'job-resumed', jobHandler: 'busy', status: 'IN_PROGRESS' }),
+      seedJob({ createdAt: '2026-06-11T00:00:02.000Z', id: 'job-busy-queued', jobHandler: 'busy', status: 'QUEUED' }),
+      seedJob({ createdAt: '2026-06-11T00:00:03.000Z', id: 'job-idle-queued-new', jobHandler: 'idle', status: 'QUEUED' }),
+      seedJob({ createdAt: '2026-06-11T00:00:00.000Z', id: 'job-idle-queued-old', jobHandler: 'idle', status: 'QUEUED' }),
+    ]);
+    const busy = createGatedHandler();
+    const idle = createGatedHandler();
+
+    seedTasks('job-resumed', [{ state: { name: 'resumed' }, status: 'IN_PROGRESS' }]);
+    seedTasks('job-busy-queued', [{ state: { name: 'busy-queued' }, status: 'SCHEDULED' }]);
+    seedTasks('job-idle-queued-new', [{ state: { name: 'idle-queued-new' }, status: 'SCHEDULED' }]);
+    seedTasks('job-idle-queued-old', [{ state: { name: 'idle-queued-old' }, status: 'SCHEDULED' }]);
+
+    plugin.registerTaskHandler({ handler: busy.handler, jobHandlerName: 'busy', parallelLimit: 1 });
+    plugin.registerTaskHandler({ handler: idle.handler, jobHandlerName: 'idle', parallelLimit: 1 });
+
+    await (plugin as any).processAllUnfinishedJobs();
+
+    // the resumed job keeps the only slot of its handler, so the queued job of the same handler waits
+    await eventually(() => expect(busy.startedTasks).toEqual(['resumed']));
+    expect(resource.records.get('job-busy-queued')).toMatchObject({ status: 'QUEUED' });
+    // the other handler has no active job, so its oldest queued job starts
+    await eventually(() => expect(idle.startedTasks).toEqual(['idle-queued-old']));
+    expect(resource.records.get('job-idle-queued-old')).toMatchObject({ status: 'IN_PROGRESS' });
+    expect(resource.records.get('job-idle-queued-new')).toMatchObject({ status: 'QUEUED' });
+
+    busy.release('resumed');
+    await eventually(() => expect(busy.startedTasks).toEqual(['resumed', 'busy-queued']));
+    expect(resource.records.get('job-resumed')).toMatchObject({ status: 'DONE' });
+    expect(resource.records.get('job-busy-queued')).toMatchObject({ status: 'IN_PROGRESS' });
+
+    busy.release('busy-queued');
+    idle.release('idle-queued-old');
+    idle.release('idle-queued-new');
+    await eventually(() => {
+      expect(resource.records.get('job-busy-queued')).toMatchObject({ status: 'DONE' });
+      expect(resource.records.get('job-idle-queued-new')).toMatchObject({ status: 'DONE' });
+    });
+  });
+
+  it('rejects an invalid concurrencyLimit', async () => {
+    const { plugin } = await createHarness();
+
+    expect(() =>
+      plugin.registerTaskHandler({ concurrencyLimit: 0, handler: vi.fn(), jobHandlerName: 'bad-limit' }),
+    ).toThrow('concurrencyLimit for jobHandler bad-limit must be an integer greater than 0');
   });
 });
 

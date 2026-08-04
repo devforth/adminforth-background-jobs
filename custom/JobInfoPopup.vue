@@ -44,7 +44,7 @@
           :show-progress="false"
           :height="3"
         />
-        <Button class="h-8" v-if="job.status === 'IN_PROGRESS'" @click="cancelJob"> {{ t('Cancel') }} </Button>
+        <Button class="h-8" v-if="job.status === 'IN_PROGRESS' || job.status === 'QUEUED'" @click="cancelJob"> {{ t('Cancel') }} </Button>
       </div>
     </div>
     <component 

@@ -2,7 +2,7 @@ import type { AdminForthComponentDeclarationFull } from "adminforth";
 export interface IJob {
   id: string;
   name: string;
-  status: 'IN_PROGRESS' | 'DONE' | 'DONE_WITH_ERRORS' | 'CANCELLED';
+  status: 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'DONE_WITH_ERRORS' | 'CANCELLED';
   state: Record<string, any>;
   progress: string; // 0 to 100
   createdAt: Date;

@@ -77,12 +77,17 @@
     isDropdownOpen.value = false;
   });
 
+  // queued jobs are pending work as well, so they are shown in the badge together with the running ones
+  const activeJobs = computed(() => {
+    return jobs.value.filter((job: IJob) => job.status === 'IN_PROGRESS' || job.status === 'QUEUED');
+  })
+
   const isAlLeastOneJobRunning = computed(() => {
-    return jobs.value.some((job: IJob) => job.status === 'IN_PROGRESS');
+    return activeJobs.value.length > 0;
   })
 
   const jobsCount = computed(() => {
-    return jobs.value.filter((job: IJob) => job.status === 'IN_PROGRESS').length;
+    return activeJobs.value.length;
   })
 
 

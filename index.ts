@@ -20,6 +20,10 @@ const getTasksBodySchema = z.object({
 }).strict();
 
 type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
+type JobStatus = 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'DONE_WITH_ERRORS' | 'CANCELLED';
+const TERMINAL_JOB_STATUSES: JobStatus[] = ['DONE', 'DONE_WITH_ERRORS', 'CANCELLED'];
+const DEFAULT_PARALLEL_LIMIT = 3;
+const DEFAULT_CONCURRENCY_LIMIT = 1;
 type setStateFieldParams = {
   (fieldName: string, value: any): Promise<void>;
   (state: Record<string, any>): Promise<void>;
@@ -44,6 +48,30 @@ type taskType = {
   skip?: boolean;
   state: Record<string, any>;
 }
+type startNewJobOptions = {
+  /**
+   * When true the job is always created in QUEUED status, even when its queue has a free concurrency slot.
+   * Without it the job is created in QUEUED status only when the queue is busy.
+   */
+  queued?: boolean;
+  /**
+   * When false a job which landed in QUEUED status stays there until something else drains the queue
+   * (startNextQueuedJob, a finishing job of the same queue, or an application restart). Default: true.
+   */
+  autoStart?: boolean;
+}
+/**
+ * Everything needed to run the tasks of a single job. Kept as one object so it can be passed through the
+ * recursive task processing without a long positional argument list.
+ */
+type jobRunContext = {
+  jobHandlerName: string;
+  jobName: string;
+  handleTask: taskHandlerType;
+  parrallelLimit: number;
+  onAllTasksDone?: onAllTasksDoneType;
+  beforeJobFinish?: beforeJobFinishType;
+}
 
 function encodeStateFieldName(fieldName: string): string {
   return encodeURIComponent(fieldName);
@@ -56,8 +84,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private beforeJobFinishHandlers: Partial<Record<string, beforeJobFinishType>> = {};
   private jobCustomComponents: Record<string, AdminForthComponentDeclarationFull> = {};
   private jobParallelLimits: Record<string, number> = {};
+  private jobConcurrencyLimits: Record<string, number> = {};
   private levelDbInstances: Record<string, Level> = {};
   private jobStateMutexes: Record<string, Mutex> = {};
+  private jobQueueMutexes: Record<string, Mutex> = {};
   private deprecatedWarningsShown = new Set<string>();
 
   constructor(options: PluginOptions) {
@@ -137,9 +167,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     })
   }
 
-  private cleanupJobMutexIfTerminalStatus(jobId: string, status: string) {
+  private cleanupJobMutexIfTerminalStatus(jobId: string, status: JobStatus) {
     // Keep mutex while job is active to preserve atomicity between concurrent tasks.
-    if (status === 'DONE' || status === 'DONE_WITH_ERRORS' || status === 'CANCELLED') {
+    if (TERMINAL_JOB_STATUSES.includes(status)) {
       delete this.jobStateMutexes[jobId];
     }
   }
@@ -285,11 +315,15 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     }
   }
   
-  public registerTaskHandler({ jobHandlerName, handler, parallelLimit = 3, onAllTasksDone, beforeJobFinish,
-  }:{jobHandlerName: string, handler: taskHandlerType, parallelLimit?: number, onAllTasksDone?: onAllTasksDoneType, beforeJobFinish?: beforeJobFinishType}) {
+  public registerTaskHandler({ jobHandlerName, handler, parallelLimit = DEFAULT_PARALLEL_LIMIT, concurrencyLimit = DEFAULT_CONCURRENCY_LIMIT, onAllTasksDone, beforeJobFinish,
+  }:{jobHandlerName: string, handler: taskHandlerType, parallelLimit?: number, concurrencyLimit?: number, onAllTasksDone?: onAllTasksDoneType, beforeJobFinish?: beforeJobFinishType}) {
+    if (!Number.isInteger(concurrencyLimit) || concurrencyLimit < 1) {
+      throw new Error(`concurrencyLimit for jobHandler ${jobHandlerName} must be an integer greater than 0, got ${concurrencyLimit}.`);
+    }
     //register the handler in a map with jobHandlerName as key and handler as value
     this.taskHandlers[jobHandlerName] = handler;
     this.jobParallelLimits[jobHandlerName] = parallelLimit;
+    this.jobConcurrencyLimits[jobHandlerName] = concurrencyLimit;
     if (onAllTasksDone) {
       this.onAllTasksDoneHandlers[jobHandlerName] = onAllTasksDone;
     } else {
@@ -309,44 +343,72 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     this.jobCustomComponents[jobHandlerName] = component;
   }
 
+
+  private buildJobRunContext(jobHandlerName: string, jobName: string): jobRunContext | null {
+    const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
+    if (!handleTask) {
+      return null;
+    }
+    return {
+      jobHandlerName,
+      jobName,
+      handleTask,
+      parrallelLimit: this.jobParallelLimits[jobHandlerName] || DEFAULT_PARALLEL_LIMIT,
+      onAllTasksDone: this.onAllTasksDoneHandlers[jobHandlerName],
+      beforeJobFinish: this.beforeJobFinishHandlers[jobHandlerName],
+    };
+  }
+
+  private async canStartJobImmediately(jobHandlerName: string, jobName: string): Promise<boolean> {
+    const concurrencyLimit = this.jobConcurrencyLimits[jobHandlerName] || DEFAULT_CONCURRENCY_LIMIT;
+    const runningJobsCount = await this.getRunningJobsCount(jobHandlerName, jobName);
+    if (runningJobsCount >= concurrencyLimit) {
+      return false;
+    }
+    const [queuedJob] = await this.listJobsByStatus(jobHandlerName, 'QUEUED', jobName, 1);
+    return !queuedJob;
+  }
+
   public async startNewJob(
     jobName: string,
     adminUser: AdminUser,
     tasks: taskType[],
     jobHandlerName: string,
     initialState: Record<string, any> = {},
+    options: startNewJobOptions = {},
   ): Promise<string> {
-
-    const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
-    const onAllTasksDone = this.onAllTasksDoneHandlers[jobHandlerName];
-    const beforeJobFinish = this.beforeJobFinishHandlers[jobHandlerName];
-    if (!handleTask) {
+    const jobRunContext = this.buildJobRunContext(jobHandlerName, jobName);
+    if (!jobRunContext) {
       throw new Error(`No handler registered for jobHandler ${jobHandlerName}. Please register a handler using the registerTaskHandler method before starting a job with this jobHandler.`);
     }
     const customComponent = this.jobCustomComponents[jobHandlerName];
-    const parrallelLimit = this.jobParallelLimits[jobHandlerName] || 3;
-    //create a record for the job in the database with status in progress
-    const objectToSave = {
-      [this.options.nameField]: jobName,
-      [this.options.startedByField]: adminUser.pk,
-      [this.options.progressField]: 0,
-      [this.options.statusField]: 'IN_PROGRESS',
-      [this.options.jobHandlerField]: jobHandlerName,
-      [this.options.stateField]: initialState
-    }
+    const { parrallelLimit } = jobRunContext;
 
-    const creationResult = await this.adminforth.resource(this.getResourceId()).create(objectToSave);
-    let createdRecord: Record<string, any> = null;
-    if (creationResult.ok === true ) {
-      createdRecord = creationResult.createdRecord;
-    } else {
-      throw new Error(`Failed to create a record for the job. Error: ${creationResult.error}`);
-    }    
+    const { createdRecord, initialStatus } = await this.getQueueMutex(jobHandlerName, jobName).runExclusive(async () => {
+      const initialStatus: JobStatus = !options.queued && await this.canStartJobImmediately(jobHandlerName, jobName)
+        ? 'IN_PROGRESS'
+        : 'QUEUED';
+      //create a record for the job in the database with status in progress (or queued, when the queue is busy)
+      const objectToSave = {
+        [this.options.nameField]: jobName,
+        [this.options.startedByField]: adminUser.pk,
+        [this.options.progressField]: 0,
+        [this.options.statusField]: initialStatus,
+        [this.options.jobHandlerField]: jobHandlerName,
+        [this.options.stateField]: initialState
+      }
+
+      const creationResult = await this.adminforth.resource(this.getResourceId()).create(objectToSave);
+      if (creationResult.ok !== true) {
+        throw new Error(`Failed to create a record for the job. Error: ${creationResult.error}`);
+      }
+      return { createdRecord: creationResult.createdRecord as Record<string, any>, initialStatus };
+    });
     const jobId = createdRecord[this.getResourcePk()];
-    
-    this.adminforth.websocket.publish('/background-jobs-job-update', { 
-      jobId, 
-      status: 'IN_PROGRESS', 
+
+    this.adminforth.websocket.publish('/background-jobs-job-update', {
+      jobId,
+      status: initialStatus,
       name: jobName,
       progress: 0,
       createdAt: createdRecord[this.options.createdAtField],
@@ -363,8 +425,154 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
     await Promise.all(createTaskRecordsPromises);
 
-    this.runProcessingTasks(tasks, jobLevelDb, jobId, handleTask, parrallelLimit, onAllTasksDone, beforeJobFinish);
+    if (initialStatus === 'IN_PROGRESS') {
+      this.runProcessingTasks(tasks, jobLevelDb, jobId, jobRunContext);
+      return jobId;
+    }
+
+    if (options.autoStart !== false) {
+      await this.startQueuedJobs(jobHandlerName, jobName);
+    }
     return jobId;
+  }
+
+  public async queueNewJob(
+    jobName: string,
+    adminUser: AdminUser,
+    tasks: taskType[],
+    jobHandlerName: string,
+    initialState: Record<string, any> = {},
+    options: Omit<startNewJobOptions, 'queued'> = {},
+  ): Promise<string> {
+    return this.startNewJob(jobName, adminUser, tasks, jobHandlerName, initialState, { ...options, queued: true });
+  }
+
+  private getQueueKey(jobHandlerName: string, jobName: string): string {
+    return JSON.stringify([jobHandlerName, jobName]);
+  }
+
+  private getQueueMutex(jobHandlerName: string, jobName: string): Mutex {
+    const queueKey = this.getQueueKey(jobHandlerName, jobName);
+    let mutex = this.jobQueueMutexes[queueKey];
+    if (!mutex) {
+      mutex = new Mutex();
+      this.jobQueueMutexes[queueKey] = mutex;
+    }
+    return mutex;
+  }
+
+  private async listJobsByStatus(
+    jobHandlerName: string,
+    status: JobStatus,
+    jobName?: string,
+    limit: number | null = null,
+  ): Promise<Record<string, any>[]> {
+    const filters = [
+      Filters.EQ(this.options.jobHandlerField, jobHandlerName),
+      Filters.EQ(this.options.statusField, status),
+    ];
+    if (jobName !== undefined) {
+      filters.push(Filters.EQ(this.options.nameField, jobName));
+    }
+    return this.adminforth.resource(this.getResourceId()).list(
+      Filters.AND(...filters),
+      limit,
+      0,
+      Sorts.ASC(this.options.createdAtField),
+    );
+  }
+
+  /**
+   * Number of jobs in the given queue which are currently occupying a concurrency slot.
+   * Uses the database as the source of truth so it stays correct after an application restart.
+   */
+  private async getRunningJobsCount(jobHandlerName: string, jobName: string): Promise<number> {
+    const runningJobs = await this.listJobsByStatus(jobHandlerName, 'IN_PROGRESS', jobName);
+    return runningJobs.length;
+  }
+
+  /**
+   * All job names of the given handler which currently have at least one queued job.
+   */
+  private async getQueuedJobNames(jobHandlerName: string): Promise<string[]> {
+    const queuedJobs = await this.listJobsByStatus(jobHandlerName, 'QUEUED');
+    return Array.from(new Set<string>(queuedJobs.map((job) => job[this.options.nameField])));
+  }
+
+  public async startNextQueuedJob(jobHandlerName: string, jobName: string): Promise<string | null> {
+    return this.getQueueMutex(jobHandlerName, jobName).runExclusive(async () => {
+      const jobRunContext = this.buildJobRunContext(jobHandlerName, jobName);
+      if (!jobRunContext) {
+        afLogger.error(`No handler registered for jobHandler ${jobHandlerName}. Cannot start queued jobs for this jobHandler.`);
+        return null;
+      }
+
+      const concurrencyLimit = this.jobConcurrencyLimits[jobHandlerName] || DEFAULT_CONCURRENCY_LIMIT;
+      const runningJobsCount = await this.getRunningJobsCount(jobHandlerName, jobName);
+      if (runningJobsCount >= concurrencyLimit) {
+        return null;
+      }
+
+      const [oldestQueuedJob] = await this.listJobsByStatus(jobHandlerName, 'QUEUED', jobName, 1);
+      if (!oldestQueuedJob) {
+        return null;
+      }
+
+      const jobId = oldestQueuedJob[this.getResourcePk()];
+      const updateResult = await this.adminforth.resource(this.getResourceId()).update(jobId, {
+        [this.options.statusField]: 'IN_PROGRESS',
+      });
+      if (updateResult?.ok === false) {
+        afLogger.error(`Failed to start queued job ${jobId}: ${updateResult.error}`);
+        return null;
+      }
+
+      this.adminforth.websocket.publish('/background-jobs-job-update', {
+        jobId,
+        status: 'IN_PROGRESS',
+        name: oldestQueuedJob[this.options.nameField],
+        progress: oldestQueuedJob[this.options.progressField],
+        createdAt: oldestQueuedJob[this.options.createdAtField],
+        customComponent: this.jobCustomComponents[jobHandlerName],
+      });
+
+      // not awaited on purpose: processing runs until the whole job is finished, while the queue mutex
+      // only has to cover taking the slot
+      this.runProcessingJobTasksFromStorage(oldestQueuedJob, jobRunContext).catch((error) => {
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        afLogger.error(`Error while processing tasks of job ${jobId}: ${errorMessage}`);
+      });
+
+      return jobId;
+    });
+  }
+
+
+  public async startQueuedJobs(jobHandlerName: string, jobName?: string): Promise<string[]> {
+    const jobNamesToStart = jobName !== undefined ? [jobName] : await this.getQueuedJobNames(jobHandlerName);
+    const startedJobIds: string[] = [];
+    for (const queuedJobName of jobNamesToStart) {
+      while (true) {
+        const startedJobId = await this.startNextQueuedJob(jobHandlerName, queuedJobName);
+        if (!startedJobId) {
+          break;
+        }
+        startedJobIds.push(startedJobId);
+      }
+    }
+    return startedJobIds;
+  }
+
+  private async startQueuedJobsSafely(jobHandlerName: string, jobName?: string) {
+    if (!jobHandlerName) {
+      return;
+    }
+    try {
+      await this.startQueuedJobs(jobHandlerName, jobName);
+    } catch (error) {
+      const errorMessage = error instanceof Error ? error.message : String(error);
+      afLogger.error(`Failed to start queued jobs for jobHandler ${jobHandlerName}: ${errorMessage}`);
+    }
   }
 
   public async addNewTasksToExistingJob(
@@ -376,8 +584,8 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       throw new Error(`Job with id ${jobId} not found.`);
     }
     const jobStatus = jobRecord[this.options.statusField];
-    if (jobStatus !== 'IN_PROGRESS') {
-      throw new Error(`Cannot add tasks to a job with status ${jobStatus}. Only jobs with status IN_PROGRESS can be added new tasks.`);
+    if (jobStatus !== 'IN_PROGRESS' && jobStatus !== 'QUEUED') {
+      throw new Error(`Cannot add tasks to a job with status ${jobStatus}. Only jobs with status IN_PROGRESS or QUEUED can be added new tasks.`);
     }
     const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
@@ -402,8 +610,8 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       throw new Error(`Job with id ${jobId} not found.`);
     }
     const jobStatus = jobRecord[this.options.statusField];
-    if (jobStatus !== 'IN_PROGRESS') {
-      throw new Error(`Cannot delete tasks from a job with status ${jobStatus}. Only jobs with status IN_PROGRESS can have tasks deleted.`);
+    if (jobStatus !== 'IN_PROGRESS' && jobStatus !== 'QUEUED') {
+      throw new Error(`Cannot delete tasks from a job with status ${jobStatus}. Only jobs with status IN_PROGRESS or QUEUED can have tasks deleted.`);
     }
     const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
@@ -436,12 +644,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     tasks: taskType[],
     jobLevelDb: Level,
     jobId: string,
-    handleTask: taskHandlerType,
-    parrallelLimit: number,
-    onAllTasksDone?: onAllTasksDoneType,
-    beforeJobFinish?: beforeJobFinishType,
+    jobRunContext: jobRunContext,
     finishAttemptNumber = 0,
   ) {
+    const { jobHandlerName, jobName, handleTask, parrallelLimit, onAllTasksDone, beforeJobFinish } = jobRunContext;
     let totalTasks = tasks.length;
     let completedTasks = 0;
     let lastJobStatus = 'IN_PROGRESS';
@@ -550,18 +756,20 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await Promise.all(tasksToExecute);
     if (lastJobStatus === 'CANCELLED') {
       this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
+      await this.startQueuedJobsSafely(jobHandlerName, jobName);
       return;
     }
     const jobStatusAfterExecution = await this.getLastJobStatus(jobId);
     if (jobStatusAfterExecution === 'CANCELLED') {
       this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
+      await this.startQueuedJobsSafely(jobHandlerName, jobName);
       return;
     }
 
     const unfinishedTasks = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
     if (unfinishedTasks.length > 0) {
       const tasksToReprocess = this.buildTasksToReprocess(tasks, unfinishedTasks);
-      await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, handleTask, parrallelLimit, onAllTasksDone, beforeJobFinish, finishAttemptNumber);
+      await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, finishAttemptNumber);
     } else {
       const nextFinishAttemptNumber = finishAttemptNumber + 1;
       await this.triggerBeforeJobFinish(beforeJobFinish, jobLevelDb, jobId, nextFinishAttemptNumber);
@@ -569,13 +777,14 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       const currentJobStatusAfterFinishCallback = await this.getLastJobStatus(jobId);
       if (currentJobStatusAfterFinishCallback === 'CANCELLED') {
         this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
+        await this.startQueuedJobsSafely(jobHandlerName, jobName);
         return;
       }
 
       const unfinishedTasksAfterFinishCallback = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
       if (unfinishedTasksAfterFinishCallback.length > 0) {
         const tasksToReprocess = this.buildTasksToReprocess(tasks, unfinishedTasksAfterFinishCallback);
-        await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, handleTask, parrallelLimit, onAllTasksDone, beforeJobFinish, nextFinishAttemptNumber);
+        await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, nextFinishAttemptNumber);
         return;
       }
 
@@ -598,6 +807,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
         await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
       }
+      await this.startQueuedJobsSafely(jobHandlerName, jobName);
     }
   }
 
@@ -621,22 +831,18 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   }
 
 
-  private async runProcessingUnfinishedTasks(
-    job: Record<string, any>
+  private async runProcessingJobTasksFromStorage(
+    job: Record<string, any>,
+    knownJobRunContext?: jobRunContext,
   ) {
-    const levelDbPath = `${this.options.levelDbPath || './background-jobs-dbs/'}job_${job[this.getResourcePk()]}`;
-    const jobLevelDb = new Level(levelDbPath, { valueEncoding: 'json' });
-    this.levelDbInstances[job[this.getResourcePk()]] = jobLevelDb;
+    const jobId = job[this.getResourcePk()];
+    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
     const jobHandlerName = job[this.options.jobHandlerField];
-    const handleTask: taskHandlerType = this.taskHandlers[jobHandlerName];
-    if (!handleTask) {
-      afLogger.error(`No handler registered for jobHandler ${jobHandlerName}. Cannot process unfinished tasks for job ${job[this.getResourcePk()]}.`);
+    const jobRunContext = knownJobRunContext || this.buildJobRunContext(jobHandlerName, job[this.options.nameField]);
+    if (!jobRunContext) {
+      afLogger.error(`No handler registered for jobHandler ${jobHandlerName}. Cannot process unfinished tasks for job ${jobId}.`);
       return;
     }
-    const parrallelLimit = this.jobParallelLimits[jobHandlerName] || 3;
-    const onAllTasksDone = this.onAllTasksDoneHandlers[jobHandlerName];
-    const beforeJobFinish = this.beforeJobFinishHandlers[jobHandlerName];
-    
     const unfinishedTasks: taskType[] = [];
     let taskIndex = 0;
     while (true) {
@@ -648,7 +854,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       try {
         parsedTaskData = JSON.parse(taskData);
       } catch (error) {
-        afLogger.error(`Error parsing task data for task ${taskIndex} of job ${job[this.getResourcePk()]}: ${error}`);
+        afLogger.error(`Error parsing task data for task ${taskIndex} of job ${jobId}: ${error}`);
         taskIndex++;
         continue;
       }
@@ -659,7 +865,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       }
       taskIndex++;
     }
-    await this.runProcessingTasks(unfinishedTasks, jobLevelDb, job[this.getResourcePk()], handleTask, parrallelLimit, onAllTasksDone, beforeJobFinish);
+    await this.runProcessingTasks(unfinishedTasks, jobLevelDb, jobId, jobRunContext);
 
   }
 
@@ -727,7 +933,17 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     for (const job of unprocessedJobs) {
       const jobName = job[this.options.nameField];
       afLogger.info(`Processing unfinished job with name ${jobName} on startup.`);
-      this.runProcessingUnfinishedTasks(job);
+      this.runProcessingJobTasksFromStorage(job);
+    }
+
+    // resumed jobs above are already IN_PROGRESS in the database, so they are counted as occupying a
+    // concurrency slot and queued jobs are started only for queues which still have a free one
+    const queuedJobs = await this.adminforth.resource(resourceId).list(Filters.EQ(this.options.statusField, 'QUEUED'));
+    const queuedJobHandlerNames = new Set<string>(queuedJobs.map((job) => job[this.options.jobHandlerField]));
+    for (const jobHandlerName of queuedJobHandlerNames) {
+      afLogger.info(`Starting queued jobs for jobHandler ${jobHandlerName} on startup.`);
+      // without a job name every queue of the handler is drained
+      await this.startQueuedJobsSafely(jobHandlerName);
     }
   }
 
@@ -817,7 +1033,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
         const oldStatus = currentJob[this.options.statusField];
-        if (oldStatus === 'DONE' || oldStatus === 'DONE_WITH_ERRORS' || oldStatus === 'CANCELLED') {
+        if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
           return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
         }
         try {
@@ -825,10 +1041,16 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             [this.options.statusField]: 'CANCELLED',
             [this.options.finishedAtField]: (new Date()).toISOString(),
           });
-          this.adminforth.websocket.publish('/background-jobs-job-update', { 
-            jobId, 
-            status: 'CANCELLED', 
+          this.adminforth.websocket.publish('/background-jobs-job-update', {
+            jobId,
+            status: 'CANCELLED',
           });
+          // a cancelled job frees its concurrency slot, so the next job queued under the same
+          // handler and job name can start
+          await this.startQueuedJobsSafely(
+            currentJob[this.options.jobHandlerField],
+            currentJob[this.options.nameField],
+          );
           return { ok: true };
         } catch (error) {
           return { ok: false, message: `Failed to cancel job with id ${jobId}.` };

@@ -1,5 +1,11 @@
 <template>
-  <Tooltip v-if="job?.status === 'IN_PROGRESS' || status === 'IN_PROGRESS'">
+  <Tooltip v-if="job?.status === 'QUEUED' || status === 'QUEUED'">
+    <IconClockOutline class="w-6 h-6 ml-2 text-gray-400" />
+    <template #tooltip>
+      {{ t('Queued') }}
+    </template>
+  </Tooltip>
+  <Tooltip v-else-if="job?.status === 'IN_PROGRESS' || status === 'IN_PROGRESS'">
     <Spinner class="w-5 h-5 ml-2" />
     <template #tooltip>
       {{ t('In progress') }}
@@ -50,7 +56,7 @@
 
   const props = defineProps<{
     job?: IJob;
-    status?: 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS';
+    status?: 'SCHEDULED' | 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS';
     error?: string;
   }>();
 </script>
