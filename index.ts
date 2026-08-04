@@ -664,20 +664,20 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         return;
       }
       if (lastJobStatus === 'CANCELLED') {
-        afLogger.info(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
+        afLogger.debug(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
         return;
       }
       const currentJobStatus = await this.getLastJobStatus(jobId);
 
       if (currentJobStatus === 'CANCELLED') {
         lastJobStatus = currentJobStatus;
-        afLogger.info(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
+        afLogger.debug(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
         return;
       }
       // check if task is still exists in level db, because it can be deleted while processing
       const taskStatus = await this.getLevelDbTaskStatusField(jobLevelDb, taskIndex.toString());
       if (!taskStatus) {
-        afLogger.info(`Task ${taskIndex} of job ${jobId} was deleted. Skipping processing.`);
+        afLogger.debug(`Task ${taskIndex} of job ${jobId} was deleted. Skipping processing.`);
         return;
       }
       const getState = async () => {
