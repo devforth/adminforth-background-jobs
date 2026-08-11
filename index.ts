@@ -24,6 +24,7 @@ type JobStatus = 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'DONE_WITH_ERRORS' | 'CANCE
 const TERMINAL_JOB_STATUSES: JobStatus[] = ['DONE', 'DONE_WITH_ERRORS', 'CANCELLED'];
 const DEFAULT_PARALLEL_LIMIT = 3;
 const DEFAULT_CONCURRENCY_LIMIT = 1;
+const LEVEL_DB_IDLE_CLOSE_MS = 1000 * 60 * 60 * 4; // 4 hours
 type setStateFieldParams = {
   (fieldName: string, value: any): Promise<void>;
   (state: Record<string, any>): Promise<void>;
@@ -85,6 +86,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private jobParallelLimits: Record<string, number> = {};
   private jobConcurrencyLimits: Record<string, number> = {};
   private levelDbInstances: Record<string, Level> = {};
+  private levelDbJobIds = new WeakMap<Level, string>();
+  private levelDbLastAccessAt: Record<string, number> = {};
+  private levelDbCloseTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   private jobStateMutexes: Record<string, Mutex> = {};
   private jobQueueMutexes: Record<string, Mutex> = {};
   private deprecatedWarningsShown = new Set<string>();
@@ -150,7 +154,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       //close level db instance if it's open and delete the level db folder for the job
       if (jobLevelDb) {
         await jobLevelDb.close();
-        delete this.levelDbInstances[recordId];
+        this.forgetLevelDb(recordId);
       }
 
       // cleanup per-job mutex as well
@@ -185,17 +189,20 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
   private async createLevelDbTaskRecord(levelDb: Level, taskId: string, initialState: Record<string, any>) {
     //create record in level db with task id as key and initial state as value and status SCHEDULED
+    this.touchLevelDb(levelDb);
     await levelDb.put(taskId, JSON.stringify({ state: initialState, status: 'SCHEDULED' }));
   }
 
   private async setLevelDbTaskStateField(levelDb: Level, taskId: string, state: Record<string, any>) {
     //update record in level db with task id as key and new state as value
+    this.touchLevelDb(levelDb);
     const status = await this.getLevelDbTaskStatusField(levelDb, taskId);
     await levelDb.del(taskId);
     await levelDb.put(taskId, JSON.stringify({ state, status }));
   }
 
   private async setLevelDbTaskStatusField(levelDb: Level, taskId: string, status: TaskStatus) {
+    this.touchLevelDb(levelDb);
     const state = await this.getLevelDbTaskStateField(levelDb, taskId);
     await levelDb.del(taskId);
     await levelDb.put(taskId, JSON.stringify({ state, status }));
@@ -203,6 +210,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
   private async getLevelDbTaskStateField(levelDb: Level, taskId: string): Promise<Record<string, any>> {
     //get record from level db with task id as key and return the value of the key in the state
+    this.touchLevelDb(levelDb);
     const state = await levelDb.get(taskId);
     if (state) {
       const parsedState = JSON.parse(state);
@@ -212,6 +220,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   }
 
   private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<TaskStatus> {
+    this.touchLevelDb(levelDb);
     const state = await levelDb.get(taskId);
     if (state) {
       const parsedState = JSON.parse(state);
@@ -221,6 +230,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   }
 
   private async getTotalTasksInLevelDb(levelDb: Level): Promise<number> {
+    this.touchLevelDb(levelDb);
     const count = await levelDb.get('_meta:count');
     return count ? parseInt(count, 10) : 0;
   }
@@ -251,11 +261,66 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       try {
         jobLevelDb = new Level(levelDbPath, { valueEncoding: 'json' });
         this.levelDbInstances[jobId] = jobLevelDb;
+        this.levelDbJobIds.set(jobLevelDb, jobId);
       } catch (error) {
         throw new Error(`Failed to access task storage for job with id ${jobId}.`);
       }
     }
+    this.touchLevelDb(jobLevelDb);
+    this.scheduleLevelDbClose(jobId);
     return jobLevelDb;
+  }
+
+  /**
+   * Marks the LevelDB of a job as used right now, so the idle close timer does not close a db which is
+   * still being read/written (for example by a job running longer than the idle window).
+   */
+  private touchLevelDb(levelDb: Level) {
+    const jobId = this.levelDbJobIds.get(levelDb);
+    if (jobId) {
+      this.levelDbLastAccessAt[jobId] = Date.now();
+    }
+  }
+
+  private scheduleLevelDbClose(jobId: string, delay: number = LEVEL_DB_IDLE_CLOSE_MS) {
+    if (this.levelDbCloseTimers[jobId]) {
+      clearTimeout(this.levelDbCloseTimers[jobId]);
+    }
+    this.levelDbCloseTimers[jobId] = setTimeout(() => { this.closeLevelDbIfIdle(jobId); }, delay);
+  }
+
+  private async closeLevelDbIfIdle(jobId: string) {
+    const jobLevelDb = this.levelDbInstances[jobId];
+    if (!jobLevelDb) {
+      this.forgetLevelDb(jobId);
+      return;
+    }
+
+    const idleFor = Date.now() - (this.levelDbLastAccessAt[jobId] ?? 0);
+    if (idleFor < LEVEL_DB_IDLE_CLOSE_MS) {
+      // db was used after this timer was scheduled, so wait for the rest of the idle window
+      this.scheduleLevelDbClose(jobId, LEVEL_DB_IDLE_CLOSE_MS - idleFor);
+      return;
+    }
+
+    try {
+      await jobLevelDb.close();
+    } catch (error) {
+      afLogger.error(`Failed to close LevelDB for job ${jobId}: ${error instanceof Error ? error.message : String(error)}`);
+      // keep the instance and try again after another idle window
+      this.scheduleLevelDbClose(jobId);
+      return;
+    }
+    this.forgetLevelDb(jobId);
+  }
+
+  private forgetLevelDb(jobId: string) {
+    if (this.levelDbCloseTimers[jobId]) {
+      clearTimeout(this.levelDbCloseTimers[jobId]);
+    }
+    delete this.levelDbCloseTimers[jobId];
+    delete this.levelDbLastAccessAt[jobId];
+    delete this.levelDbInstances[jobId];
   }
 
   private publishJobStateField(jobId: string, fieldName: string, value: any) {
@@ -1033,9 +1098,18 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
       request_schema: getTasksBodySchema,
-      handler: async ({ body }) => {
+      handler: async ({ body }) => { 
         const data = body as z.infer<typeof getTasksBodySchema>;
         const { jobId, limit, offset, fieldsToReturn } = data;
+        const resource = this.adminforth.resource(this.getResourceId());
+        const primaryKeyColumn = this.resourceConfig.columns.find((column) => column.primaryKey === true);
+        const job = await resource.get(
+          Filters.EQ(primaryKeyColumn.name, jobId)
+        );
+        if (!job) {
+          return { ok: false, message: 'Job not found' };
+        }
+
         const jobLevelDb: Level = await this.getLevelDbForTheJob(jobId as string);
         if (!jobLevelDb) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
