@@ -1,27 +1,49 @@
 <template>
   <div class="relative" ref="dropdownRef">
-    <div class="cursor-pointer hover:scale-110 transition-transform" @click="isDropdownOpen = !isDropdownOpen">
-      <div class="relative flex items-center justify-center" v-if="jobs.length > 0">
-        <Tooltip>
-          <IconCheckCircleOutline class="w-7 h-7 text-lightNavbarIcons dark:text-darkNavbarIcons" />
-          <template #tooltip>
-            {{ isAlLeastOneJobRunning ? t('Jobs in progress') : t('All jobs completed') }}
-          </template>
-        </Tooltip>
-        <div
-          v-if="isAlLeastOneJobRunning" 
-          class="ping-animation absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
-        >
-          {{ jobsCount }}
+    <button
+      type="button"
+      class="relative flex cursor-pointer flex-col items-stretch justify-center text-lightNavbarIcons transition-transform hover:scale-110 dark:text-darkNavbarIcons"
+      :aria-expanded="isDropdownOpen"
+      :aria-label="t('Jobs')"
+      @click="isDropdownOpen = !isDropdownOpen"
+    >
+      <div class="flex items-end justify-center gap-1">
+        <div v-if="jobs.length > 0" class="relative flex items-center justify-center">
+          <Tooltip>
+            <IconCheckCircleOutline class="w-6 h-6" />
+            <template #tooltip>
+              {{ isAlLeastOneJobRunning ? t('Jobs in progress') : t('All jobs completed') }}
+            </template>
+          </Tooltip>
+          <div
+            v-if="isAlLeastOneJobRunning"
+            class="ping-animation absolute -right-2 -top-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
+          >
+            {{ jobsCount }}
+          </div>
+          <div
+            v-if="isAlLeastOneJobRunning"
+            class="absolute -right-2 -top-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
+          >
+            {{ jobsCount }}
+          </div>
         </div>
-        <div 
-          v-if="isAlLeastOneJobRunning" 
-          class="absolute -bottom-1 -right-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
-        >
-          {{ jobsCount }}
-        </div>
+        <span class="relative bottom-[0.1875rem] text-sm leading-none">
+          {{ t('Jobs') }}
+        </span>
       </div>
-    </div>
+      <ProgressBar
+        v-if="isAlLeastOneJobRunning"
+        class="mt-1 w-full !h-1 [&>div]:!h-1"
+        :current-value="overallProgress"
+        :max-value="100"
+        :min-value="0"
+        :showAnimation="true"
+        :showLabels="false"
+        :showValues="false"
+        :show-progress="false"
+      />
+    </button>
     <Transition
       enter-active-class="transition ease-out duration-200"
       enter-from-class="opacity-0 scale-95"
@@ -48,7 +70,7 @@
 <script setup lang="ts">
   import type { AdminUser } from 'adminforth';
   import { onMounted, onUnmounted, ref, computed } from 'vue';
-  import { Tooltip } from '@/afcl';
+  import { ProgressBar, Tooltip } from '@/afcl';
   import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
@@ -88,6 +110,19 @@
 
   const jobsCount = computed(() => {
     return activeJobs.value.length;
+  })
+
+  const overallProgress = computed(() => {
+    if (activeJobs.value.length === 0) {
+      return 0;
+    }
+
+    const totalProgress = activeJobs.value.reduce((sum, job) => {
+      const progress = Number(job.progress);
+      return sum + (Number.isFinite(progress) ? Math.min(100, Math.max(0, progress)) : 0);
+    }, 0);
+
+    return Math.round(totalProgress / activeJobs.value.length);
   })
 
 
