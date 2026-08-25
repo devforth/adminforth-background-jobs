@@ -14,8 +14,8 @@ const jobIdBodySchema = z.object({
 
 const getTasksBodySchema = z.object({
   jobId: z.union([z.string(), z.number()]),
-  limit: z.number(),
-  offset: z.number(),
+  limit: z.number().int().positive().max(100),
+  offset: z.number().int().nonnegative(),
   fieldsToReturn: z.array(z.string()).optional(),
 }).strict();
 
@@ -331,6 +331,14 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
   }
 
+  private publishJobUpdate(data: Record<string, any>) {
+    this.adminforth.websocket.publish('/background-jobs-job-update', data);
+  }
+
+  private async getJobById(jobId: string | number): Promise<Record<string, any> | null> {
+    return this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+  }
+
   private publishTaskStateFields(jobId: string, taskIndex: number, state: Record<string, any>) {
     for (const [fieldName, value] of Object.entries(state)) {
       this.adminforth.websocket.publish(`/background-jobs-task-state-update/${jobId}/${encodeStateFieldName(fieldName)}`, {
@@ -376,6 +384,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : String(error);
       afLogger.error(`Error in beforeJobFinish callback for job ${jobId}: ${errorMessage}`);
+      throw error;
     }
   }
   
@@ -434,7 +443,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
   public async startNewJob(
     jobName: string,
-    adminUser: AdminUser,
+    adminUser: AdminUser | null,
     tasks: taskType[],
     jobHandlerName: string,
     initialState: Record<string, any> = {},
@@ -446,6 +455,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     }
     const customComponent = this.jobCustomComponents[jobHandlerName];
     const { parrallelLimit } = jobRunContext;
+    const startedBy = adminUser?.pk ?? null;
 
     const { createdRecord, initialStatus } = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
       const initialStatus: JobStatus = !options.queued && await this.canStartJobImmediately(jobHandlerName)
@@ -454,7 +464,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       //create a record for the job in the database with status in progress (or queued, when the queue is busy)
       const objectToSave = {
         [this.options.nameField]: jobName,
-        [this.options.startedByField]: adminUser.pk,
+        [this.options.startedByField]: startedBy,
         [this.options.progressField]: 0,
         [this.options.statusField]: initialStatus,
         [this.options.jobHandlerField]: jobHandlerName,
@@ -469,7 +479,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
     const jobId = createdRecord[this.getResourcePk()];
 
-    this.adminforth.websocket.publish('/background-jobs-job-update', {
+    this.publishJobUpdate({
       jobId,
       status: initialStatus,
       name: jobName,
@@ -489,7 +499,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await Promise.all(createTaskRecordsPromises);
 
     if (initialStatus === 'IN_PROGRESS') {
-      this.runProcessingTasks(tasks, jobLevelDb, jobId, jobRunContext);
+      this.runProcessingTasks(tasks, jobLevelDb, jobId, jobRunContext).catch((error) => {
+        void this.handleJobProcessingFailure(jobId, jobHandlerName, error);
+      });
       return jobId;
     }
 
@@ -501,7 +513,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
   public async queueNewJob(
     jobName: string,
-    adminUser: AdminUser,
+    adminUser: AdminUser | null,
     tasks: taskType[],
     jobHandlerName: string,
     initialState: Record<string, any> = {},
@@ -571,7 +583,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         return null;
       }
 
-      this.adminforth.websocket.publish('/background-jobs-job-update', {
+      this.publishJobUpdate({
         jobId,
         status: 'IN_PROGRESS',
         name: oldestQueuedJob[this.options.nameField],
@@ -583,8 +595,11 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       // not awaited on purpose: processing runs until the whole job is finished, while the queue mutex
       // only has to cover taking the slot
       this.runProcessingJobTasksFromStorage(oldestQueuedJob, jobRunContext).catch((error) => {
-        const errorMessage = error instanceof Error ? error.message : String(error);
-        afLogger.error(`Error while processing tasks of job ${jobId}: ${errorMessage}`);
+        void this.handleJobProcessingFailure(
+          jobId,
+          jobHandlerName,
+          error,
+        );
       });
 
       return jobId;
@@ -658,7 +673,11 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     if (taskIndex >= currentTotalTasks) {
       throw new Error(`Invalid task index ${taskIndex}.`);
     }
-    await jobLevelDb.del(taskIndex.toString());
+    for (let indexToMove = taskIndex + 1; indexToMove < currentTotalTasks; indexToMove++) {
+      const taskToMove = await jobLevelDb.get(indexToMove.toString());
+      await jobLevelDb.put((indexToMove - 1).toString(), taskToMove);
+    }
+    await jobLevelDb.del((currentTotalTasks - 1).toString());
     await jobLevelDb.put('_meta:count', `${currentTotalTasks - 1}`);
   }
 
@@ -834,7 +853,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           [this.options.statusField]: 'DONE',
           [this.options.finishedAtField]: (new Date()).toISOString(),
         })
-        this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
+        this.publishJobUpdate({ jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
         this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
         await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
       } else {
@@ -843,7 +862,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           [this.options.finishedAtField]: (new Date()).toISOString(),
         })
         const jobError = await this.getJobStateField(jobId, 'error');
-        this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, status: 'DONE_WITH_ERRORS', finishedAt: (new Date()).toISOString(), error: jobError });
+        this.publishJobUpdate({ jobId, status: 'DONE_WITH_ERRORS', finishedAt: (new Date()).toISOString(), error: jobError });
         this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
         await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
       }
@@ -857,7 +876,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return currentJobStatus;
   }
 
-  private async handleFinishTask(completedTasks: number, totalTasks: number, jobId: string, wasTaskSkipped: boolean = false) {
+  private async handleFinishTask(completedTasks: number, totalTasks: number, jobId: string, wasTaskSkipped: boolean) {
     completedTasks++;
     if (wasTaskSkipped) {
       return completedTasks;
@@ -866,8 +885,37 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await this.adminforth.resource(this.getResourceId()).update(jobId, {
       [this.options.progressField]: progress,
     })
-    this.adminforth.websocket.publish('/background-jobs-job-update', { jobId, progress });
+    this.publishJobUpdate({ jobId, progress });
     return completedTasks;
+  }
+
+  private async handleJobProcessingFailure(
+    jobId: string,
+    jobHandlerName: string,
+    error: unknown,
+  ) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    afLogger.error(`Error while processing tasks of job ${jobId}: ${errorMessage}`);
+
+    try {
+      const currentStatus = await this.getLastJobStatus(jobId);
+      if (TERMINAL_JOB_STATUSES.includes(currentStatus as JobStatus)) {
+        return;
+      }
+
+      await this.setJobStateField(jobId, 'error', errorMessage);
+      const finishedAt = new Date().toISOString();
+      await this.adminforth.resource(this.getResourceId()).update(jobId, {
+        [this.options.statusField]: 'DONE_WITH_ERRORS',
+        [this.options.finishedAtField]: finishedAt,
+      });
+      this.publishJobUpdate({ jobId, status: 'DONE_WITH_ERRORS', finishedAt, error: errorMessage });
+      this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
+      await this.startQueuedJobsSafely(jobHandlerName);
+    } catch (failureHandlingError) {
+      const failureMessage = failureHandlingError instanceof Error ? failureHandlingError.message : String(failureHandlingError);
+      afLogger.error(`Failed to mark job ${jobId} as DONE_WITH_ERRORS: ${failureMessage}`);
+    }
   }
 
 
@@ -905,7 +953,12 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       }
       taskIndex++;
     }
-    await this.runProcessingTasks(unfinishedTasks, jobLevelDb, jobId, jobRunContext);
+    await this.runProcessingTasks(
+      unfinishedTasks,
+      jobLevelDb,
+      jobId,
+      jobRunContext,
+    );
 
   }
 
@@ -973,7 +1026,13 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     for (const job of unprocessedJobs) {
       const jobName = job[this.options.nameField];
       afLogger.info(`Processing unfinished job with name ${jobName} on startup.`);
-      this.runProcessingJobTasksFromStorage(job);
+      this.runProcessingJobTasksFromStorage(job).catch((error) => {
+        void this.handleJobProcessingFailure(
+          job[this.getResourcePk()],
+          job[this.options.jobHandlerField],
+          error,
+        );
+      });
     }
 
     // resumed jobs above are already IN_PROGRESS in the database, so they are counted as occupying a
@@ -1013,11 +1072,14 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/get-list-of-jobs`,
-      handler: async ({ adminUser }) => {
-        const user = adminUser;
-        const startedByField = this.options.startedByField;
+      handler: async () => {
         const resourcePk = this.getResourcePk();
-        const listOfJobs = await this.adminforth.resource(this.resourceConfig.resourceId).list(Filters.EQ(startedByField, user.pk), 100, 0, Sorts.DESC(this.options.createdAtField));
+        const listOfJobs = await this.adminforth.resource(this.resourceConfig.resourceId).list(
+          Filters.IS_NOT_EMPTY(resourcePk),
+          100,
+          0,
+          Sorts.DESC(this.options.createdAtField),
+        );
         
         const jobsToReturn = listOfJobs.map(job => {
           return {
@@ -1038,11 +1100,11 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       method: 'POST',
       path: `/plugin/get-background-job-info`,
       request_schema: jobIdBodySchema,
-      handler: async ({ adminUser, body }) => {
+      handler: async ({ body }) => {
         const data = body as z.infer<typeof jobIdBodySchema>;
         const jobId = data.jobId;
 
-        const job = await this.adminforth.resource(this.resourceConfig.resourceId).get(Filters.EQ(this.getResourcePk(), jobId));
+        const job = await this.getJobById(jobId);
         if (!job) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
@@ -1068,7 +1130,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       handler: async ({ body }) => {
         const data = body as z.infer<typeof jobIdBodySchema>;
         const jobId = data.jobId;
-        const currentJob = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+        const currentJob = await this.getJobById(jobId);
         if (!currentJob) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
@@ -1081,7 +1143,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
             [this.options.statusField]: 'CANCELLED',
             [this.options.finishedAtField]: (new Date()).toISOString(),
           });
-          this.adminforth.websocket.publish('/background-jobs-job-update', {
+          this.publishJobUpdate({
             jobId,
             status: 'CANCELLED',
           });
@@ -1098,14 +1160,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/get-tasks`,
       request_schema: getTasksBodySchema,
-      handler: async ({ body }) => { 
+      handler: async ({ body }) => {
         const data = body as z.infer<typeof getTasksBodySchema>;
         const { jobId, limit, offset, fieldsToReturn } = data;
-        const resource = this.adminforth.resource(this.getResourceId());
-        const primaryKeyColumn = this.resourceConfig.columns.find((column) => column.primaryKey === true);
-        const job = await resource.get(
-          Filters.EQ(primaryKeyColumn.name, jobId)
-        );
+        const job = await this.getJobById(jobId);
         if (!job) {
           return { ok: false, message: 'Job not found' };
         }

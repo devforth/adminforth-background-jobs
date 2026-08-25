@@ -23,6 +23,7 @@ const adminforthMock = vi.hoisted(() => {
     Filters: {
       AND: (...subFilters: any[]) => ({ operator: 'AND', subFilters }),
       EQ: (field: string, value: any) => ({ field, operator: 'EQ', value }),
+      IS_NOT_EMPTY: (field: string) => ({ field, operator: 'IS_NOT_EMPTY' }),
     },
     Sorts: {
       ASC: (field: string) => ({ direction: 'ASC', field }),
@@ -123,6 +124,9 @@ function matchesFilter(record: Record<string, any>, filter?: MockFilter): boolea
   }
   if (filter.operator === 'AND') {
     return (filter.subFilters || []).every((subFilter) => matchesFilter(record, subFilter));
+  }
+  if (filter.operator === 'IS_NOT_EMPTY') {
+    return record[filter.field!] != null && record[filter.field!] !== '';
   }
   return record[filter.field!] === filter.value;
 }
@@ -479,6 +483,53 @@ describe('BackgroundJobsPlugin job processing', () => {
     expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' });
   });
 
+  it('finishes with errors when beforeJobFinish fails', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    plugin.registerTaskHandler({
+      beforeJobFinish: async () => {
+        throw new Error('finish callback exploded');
+      },
+      handler: async () => {},
+      jobHandlerName: 'failing-finish',
+    });
+
+    const jobId = await plugin.startNewJob(
+      'Failing finish callback',
+      { pk: 'user-1' } as any,
+      [{ state: {} }],
+      'failing-finish',
+    );
+
+    await eventually(() => {
+      expect(resource.records.get(jobId)).toMatchObject({
+        state: { error: 'finish callback exploded' },
+        status: 'DONE_WITH_ERRORS',
+      });
+    });
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith(
+      '/background-jobs-job-update',
+      expect.objectContaining({ error: 'finish callback exploded', jobId, status: 'DONE_WITH_ERRORS' }),
+    );
+  });
+
+  it('publishes ownerless job updates to the public channel', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    plugin.registerTaskHandler({ handler: async () => {}, jobHandlerName: 'public-job' });
+
+    const jobId = await plugin.startNewJob(
+      'Public job',
+      null,
+      [{ state: {} }],
+      'public-job',
+    );
+
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' }));
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith(
+      '/background-jobs-job-update',
+      expect.objectContaining({ jobId, status: 'DONE' }),
+    );
+  });
+
   it('rejects a job start when no task handler is registered', async () => {
     const { plugin, resource } = await createHarness();
 
@@ -747,7 +798,7 @@ describe('BackgroundJobsPlugin queued jobs', () => {
     await eventually(() => expect(startedTasks).toEqual(['running']));
 
     await expect(
-      endpoints.get('POST /plugin/test-plugin/cancel-job')({ body: { jobId: runningJobId } }),
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({ adminUser: { pk: 'user-1' }, body: { jobId: runningJobId } }),
     ).resolves.toEqual({ ok: true });
 
     expect(resource.records.get(runningJobId)).toMatchObject({ status: 'CANCELLED' });
@@ -777,7 +828,7 @@ describe('BackgroundJobsPlugin queued jobs', () => {
     await eventually(() => expect(startedTasks).toEqual(['running']));
 
     await expect(
-      endpoints.get('POST /plugin/test-plugin/cancel-job')({ body: { jobId: queuedJobId } }),
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({ adminUser: { pk: 'user-1' }, body: { jobId: queuedJobId } }),
     ).resolves.toEqual({ ok: true });
 
     expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'CANCELLED' });
@@ -866,7 +917,7 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
     );
   });
 
-  it('deletes tasks from an in-progress job without compacting indexes', async () => {
+  it('deletes tasks from an in-progress job and compacts indexes', async () => {
     const { plugin } = await createHarness([seedJob({ id: 'job-delete' })]);
     seedTasks('job-delete', [
       { state: { input: 1 }, status: 'DONE' },
@@ -878,8 +929,8 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
 
     expect(getJobStore('job-delete').get('_meta:count')).toBe('2');
     expect(readTask('job-delete', 0)).toEqual({ state: { input: 1 }, status: 'DONE' });
-    expect(readTask('job-delete', 1)).toBeUndefined();
-    expect(readTask('job-delete', 2)).toEqual({ state: { input: 3 }, status: 'SCHEDULED' });
+    expect(readTask('job-delete', 1)).toEqual({ state: { input: 3 }, status: 'SCHEDULED' });
+    expect(readTask('job-delete', 2)).toBeUndefined();
   });
 
   it('validates delete task preconditions', async () => {
@@ -950,6 +1001,13 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
         startedBy: 'user-2',
         status: 'DONE',
       }),
+      seedJob({
+        createdAt: '2026-06-10T00:00:00.000Z',
+        id: 'job-public',
+        name: 'Public job',
+        startedBy: null,
+        status: 'DONE',
+      }),
     ]);
     const customComponent = { file: 'JobDetails.vue' };
     const endpoints = new Map<string, any>();
@@ -994,6 +1052,33 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
           progress: 10,
           status: 'IN_PROGRESS',
         },
+        {
+          createdAt: '2026-06-11T00:00:00.000Z',
+          customComponent: undefined,
+          finishedAt: null,
+          id: 'job-other-user',
+          name: 'Other user job',
+          progress: 0,
+          status: 'IN_PROGRESS',
+        },
+        {
+          createdAt: '2026-06-11T00:00:00.000Z',
+          customComponent: undefined,
+          finishedAt: null,
+          id: 'job-terminal',
+          name: 'Terminal job',
+          progress: 0,
+          status: 'DONE',
+        },
+        {
+          createdAt: '2026-06-10T00:00:00.000Z',
+          customComponent: undefined,
+          finishedAt: null,
+          id: 'job-public',
+          name: 'Public job',
+          progress: 0,
+          status: 'DONE',
+        },
       ],
     });
 
@@ -1023,7 +1108,10 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
     ).resolves.toEqual({ message: 'Job with id missing-job not found.', ok: false });
 
     await expect(
-      endpoints.get('POST /plugin/test-plugin/cancel-job')({ body: { jobId: 'job-user-new' } }),
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({
+        adminUser: { pk: 'user-1' },
+        body: { jobId: 'job-user-new' },
+      }),
     ).resolves.toEqual({ ok: true });
     expect(resource.records.get('job-user-new')).toMatchObject({ status: 'CANCELLED' });
     expect(resource.records.get('job-user-new')?.finishedAt).toEqual(expect.any(String));
@@ -1033,11 +1121,15 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
     });
 
     await expect(
-      endpoints.get('POST /plugin/test-plugin/cancel-job')({ body: { jobId: 'job-terminal' } }),
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({
+        adminUser: { pk: 'user-2' },
+        body: { jobId: 'job-terminal' },
+      }),
     ).resolves.toEqual({ message: 'Cannot cancel a job with status DONE.', ok: false });
 
     await expect(
       endpoints.get('POST /plugin/test-plugin/get-tasks')({
+        adminUser: { pk: 'user-1' },
         body: { jobId: 'job-user-new', limit: 2, offset: 1 },
       }),
     ).resolves.toEqual({
@@ -1045,6 +1137,40 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
         tasks: [
           { state: { input: 2 }, status: 'SCHEDULED' },
           { state: { input: 3 }, status: 'FAILED' },
+        ],
+        total: 3,
+      },
+      ok: true,
+    });
+
+    await expect(
+      endpoints.get('POST /plugin/get-background-job-info')({
+        adminUser: { pk: 'user-1' },
+        body: { jobId: 'job-other-user' },
+      }),
+    ).resolves.toMatchObject({ job: { id: 'job-other-user', name: 'Other user job' }, ok: true });
+    await expect(
+      endpoints.get('POST /plugin/get-background-job-info')({
+        adminUser: { pk: 'user-1' },
+        body: { jobId: 'job-public' },
+      }),
+    ).resolves.toMatchObject({ job: { id: 'job-public', name: 'Public job' }, ok: true });
+    await expect(
+      endpoints.get('POST /plugin/test-plugin/cancel-job')({
+        adminUser: { pk: 'user-1' },
+        body: { jobId: 'job-other-user' },
+      }),
+    ).resolves.toEqual({ ok: true });
+    await expect(
+      endpoints.get('POST /plugin/test-plugin/get-tasks')({
+        adminUser: { pk: 'user-2' },
+        body: { jobId: 'job-user-new', limit: 2, offset: 0 },
+      }),
+    ).resolves.toMatchObject({
+      data: {
+        tasks: [
+          { state: { input: 1 }, status: 'DONE' },
+          { state: { input: 2 }, status: 'SCHEDULED' },
         ],
         total: 3,
       },
