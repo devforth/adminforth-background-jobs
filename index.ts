@@ -49,6 +49,9 @@ type taskType = {
   skip?: boolean;
   state: Record<string, any>;
 }
+type indexedTaskType = taskType & {
+  taskIndex: number;
+}
 type startNewJobOptions = {
   /**
    * When true the job is always created in QUEUED status, even when its queue has a free concurrency slot.
@@ -681,22 +684,29 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await jobLevelDb.put('_meta:count', `${currentTotalTasks - 1}`);
   }
 
-  private async getUnfinishedTasksFromLevelDb(levelDb: Level): Promise<{ state: Record<string, any> }[]> {
+  private async getUnfinishedTasksFromLevelDb(levelDb: Level): Promise<indexedTaskType[]> {
     const totalTasks = await this.getTotalTasksInLevelDb(levelDb);
-    const unfinishedTasks: { state: Record<string, any> }[] = [];
+    const unfinishedTasks: indexedTaskType[] = [];
     for (let taskIndex = 0; taskIndex < totalTasks; taskIndex++) {
       const status = await this.getLevelDbTaskStatusField(levelDb, taskIndex.toString());
       if (status === 'IN_PROGRESS' || status === 'SCHEDULED') {
         const state = await this.getLevelDbTaskStateField(levelDb, taskIndex.toString());
-        unfinishedTasks.push({ state });
+        unfinishedTasks.push({ state, taskIndex });
       }
     }
     return unfinishedTasks;
   }
 
-  private buildTasksToReprocess(tasks: taskType[], unfinishedTasks: taskType[]): taskType[] {
-    const skippedTasks = tasks.map((task) => ({ ...task, skip: true, state: task.state || {} }));
-    return [...skippedTasks, ...unfinishedTasks];
+  private async buildTasksToReprocess(levelDb: Level, unfinishedTasks: indexedTaskType[]): Promise<taskType[]> {
+    const totalTasks = await this.getTotalTasksInLevelDb(levelDb);
+    const tasksToReprocess: taskType[] = Array.from(
+      { length: totalTasks },
+      () => ({ skip: true, state: {} }),
+    );
+    for (const { taskIndex, state } of unfinishedTasks) {
+      tasksToReprocess[taskIndex] = { state };
+    }
+    return tasksToReprocess;
   }
 
   private async runProcessingTasks(
@@ -827,7 +837,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
     const unfinishedTasks = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
     if (unfinishedTasks.length > 0) {
-      const tasksToReprocess = this.buildTasksToReprocess(tasks, unfinishedTasks);
+      const tasksToReprocess = await this.buildTasksToReprocess(jobLevelDb, unfinishedTasks);
       await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, finishAttemptNumber);
     } else {
       const nextFinishAttemptNumber = finishAttemptNumber + 1;
@@ -842,7 +852,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
       const unfinishedTasksAfterFinishCallback = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
       if (unfinishedTasksAfterFinishCallback.length > 0) {
-        const tasksToReprocess = this.buildTasksToReprocess(tasks, unfinishedTasksAfterFinishCallback);
+        const tasksToReprocess = await this.buildTasksToReprocess(jobLevelDb, unfinishedTasksAfterFinishCallback);
         await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, nextFinishAttemptNumber);
         return;
       }

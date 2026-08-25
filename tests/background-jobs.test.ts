@@ -483,6 +483,41 @@ describe('BackgroundJobsPlugin job processing', () => {
     expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' });
   });
 
+  it('reprocesses a task at its LevelDB index after an earlier task is deleted', async () => {
+    const { plugin, resource } = await createHarness();
+    const handledInputs: string[] = [];
+    const beforeJobFinish = vi.fn(async ({ finishAttemptNumber, jobId }) => {
+      if (finishAttemptNumber === 1) {
+        await plugin.deleteTasksFromExistingJob(jobId, 1);
+        await plugin.addNewTasksToExistingJob(jobId, [{ state: { input: 'added-after-delete' } }]);
+      }
+    });
+
+    plugin.registerTaskHandler({
+      beforeJobFinish,
+      handler: async ({ getTaskStateField }) => {
+        handledInputs.push(await getTaskStateField('input'));
+      },
+      jobHandlerName: 'reprocess-after-delete',
+      parallelLimit: 1,
+    });
+
+    const jobId = await plugin.startNewJob(
+      'Reprocess after delete',
+      { pk: 'user-1' } as any,
+      [{ state: { input: 'first' } }, { state: { input: 'deleted' } }, { state: { input: 'third' } }],
+      'reprocess-after-delete',
+    );
+
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' }));
+
+    expect(handledInputs).toEqual(['first', 'deleted', 'third', 'added-after-delete']);
+    expect(beforeJobFinish).toHaveBeenCalledTimes(2);
+    expect(getJobStore(jobId).get('_meta:count')).toBe('3');
+    expect(readTask(jobId, 1)).toEqual({ state: { input: 'third' }, status: 'DONE' });
+    expect(readTask(jobId, 2)).toEqual({ state: { input: 'added-after-delete' }, status: 'DONE' });
+  });
+
   it('finishes with errors when beforeJobFinish fails', async () => {
     const { adminforth, plugin, resource } = await createHarness();
     plugin.registerTaskHandler({

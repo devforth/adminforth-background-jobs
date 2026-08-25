@@ -5,7 +5,7 @@
       class="relative flex cursor-pointer flex-col items-stretch justify-center text-lightNavbarIcons transition-transform hover:scale-110 dark:text-darkNavbarIcons"
       :aria-expanded="isDropdownOpen"
       :aria-label="t('Jobs')"
-      @click="isDropdownOpen = !isDropdownOpen"
+      @click="toggleJobsDropdown"
     >
       <div class="flex items-end justify-center gap-1">
         <div v-if="jobs.length > 0" class="relative flex items-center justify-center">
@@ -125,6 +125,27 @@
     return Math.round(totalProgress / activeJobs.value.length);
   })
 
+  async function loadJobs() {
+    try {
+      const res = await callAdminForthApi({
+        path: `/plugin/${props.meta.pluginInstanceId}/get-list-of-jobs`,
+        method: 'POST',
+      });
+      jobs.value = res.jobs;
+    } catch (error) {
+      console.error('Error fetching jobs:', error);
+    }
+  }
+
+  async function toggleJobsDropdown() {
+    if (isDropdownOpen.value) {
+      isDropdownOpen.value = false;
+      return;
+    }
+    await loadJobs();
+    isDropdownOpen.value = true;
+  }
+
 
 
   onMounted(async () => {
@@ -152,29 +173,20 @@
             ...data.state,
           };
         }
-      } else {
+      } else if (data.name && data.createdAt) {
         jobs.value.unshift({
           id: data.jobId,
-          name: data.name || 'Unknown Job',
+          name: data.name,
           status: data.status || 'IN_PROGRESS',
           state: data.state || {},
           progress: data.progress || 0,
-          createdAt: data.createdAt || new Date().toISOString(),
+          createdAt: data.createdAt,
           customComponent: data.customComponent,
         });
       }
     });
 
-
-    try {
-      const res = await callAdminForthApi({
-        path: `/plugin/${props.meta.pluginInstanceId}/get-list-of-jobs`,
-        method: 'POST',
-      });
-      jobs.value = res.jobs;
-    } catch (error) {
-      console.error('Error fetching jobs:', error);
-    }
+    await loadJobs();
   });
 
 
