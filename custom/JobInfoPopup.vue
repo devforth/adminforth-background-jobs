@@ -44,7 +44,7 @@
           :show-progress="false"
           :height="3"
         />
-        <Button class="h-8" v-if="job.status === 'IN_PROGRESS' || job.status === 'QUEUED'" @click="cancelJob"> {{ t('Cancel') }} </Button>
+        <Button class="h-8" v-if="isJobCancellable(job)" @click="cancelJob"> {{ t('Cancel') }} </Button>
       </div>
     </div>
     <component 
@@ -64,6 +64,7 @@
 
 <script setup lang="ts">
 import type { IJob } from './utils';
+import { cancelJobById, isJobCancellable } from './utils';
 import { ProgressBar, Button, Tooltip } from '@/afcl';
 import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils';
 import { useI18n } from 'vue-i18n';
@@ -220,30 +221,11 @@ function subscribeToJobTaskFields(fieldNames: string[]) {
 }
 
 async function cancelJob() {
-  // Implement job cancellation logic here
-  const isConfirmed = await adminforth.confirm({ message: t('Are you sure you want to cancel this job?') });
-  if (!isConfirmed) {
-    return;
-  }
-  const failedToCancelText = t('Failed to cancel job');
-  console.log(`Canceling job with ID: ${props.job.id}`);
-  try {
-    const res = await callAdminForthApi({
-      path: `/plugin/${props.meta.pluginInstanceId}/cancel-job`,
-      method: 'POST',
-      body: {
-        jobId: props.job.id,
-      },
-    });
-    if (res.ok) {
-      adminforth.alert({ message: t('Job cancelled successfully'), variant: 'success' });
-    } else {
-      adminforth.alert({ message: failedToCancelText, variant: 'danger' });
-    }
-  } catch (error) {
-    adminforth.alert({ message: failedToCancelText, variant: 'danger' });
-    console.error('Error canceling job:', error);
-  }
+  await cancelJobById({
+    jobId: props.job.id,
+    pluginInstanceId: props.meta.pluginInstanceId,
+    t,
+  });
 }
 
 
