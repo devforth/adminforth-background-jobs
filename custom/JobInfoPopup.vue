@@ -47,12 +47,22 @@
         <Button class="h-8" v-if="isJobCancellable(job)" @click="cancelJob"> {{ t('Cancel') }} </Button>
       </div>
     </div>
+    <div
+      v-if="tasksStorageLost"
+      class="flex items-start gap-2 w-full mt-4 p-3 rounded-lg text-sm border border-yellow-300 bg-yellow-50 text-yellow-800 dark:border-yellow-700 dark:bg-yellow-900/30 dark:text-yellow-200"
+    >
+      <svg class="w-4 h-4 mt-0.5 shrink-0" aria-hidden="true" xmlns="http://www.w3.org/2000/svg" fill="currentColor" viewBox="0 0 20 20">
+        <path d="M10 .5a9.5 9.5 0 1 0 9.5 9.5A9.51 9.51 0 0 0 10 .5ZM9.5 4a1.5 1.5 0 1 1 0 3 1.5 1.5 0 0 1 0-3ZM12 15H8a1 1 0 0 1 0-2h1v-3H8a1 1 0 0 1 0-2h2a1 1 0 0 1 1 1v4h1a1 1 0 0 1 0 2Z"/>
+      </svg>
+      <span>{{ t('Task details are no longer available: the task storage of this job was deleted.') }}</span>
+    </div>
     <component 
       v-if="job.customComponent"
       class="mt-4" 
       :is="getCustomComponent(job.customComponent)" 
       :meta="job.customComponent"
       :getJobTasks="getJobTasks"
+      :tasksStorageLost="tasksStorageLost"
       :job="job"
       :subscribeToJobStateFields="subscribeToJobStateFields"
       :subscribeToJobTaskFields="subscribeToJobTaskFields"
@@ -70,7 +80,7 @@ import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils'
 import { useI18n } from 'vue-i18n';
 import StateToIcon from './StateToIcon.vue';
 import { useAdminforth } from '@/adminforth';
-import { onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import websocket from '@/websocket';
 import { useBackgroundJobApi } from './useBackgroundJobApi';
 
@@ -104,6 +114,8 @@ type TaskStateFieldUpdate = JobStateFieldUpdate & {
 };
 
 const jobTasks = ref<JobTask[]>([]);
+const tasksStorageLostForJobId = ref<string | null>(null);
+const tasksStorageLost = computed(() => tasksStorageLostForJobId.value === props.job.id);
 const subscriptionCleanups = new Set<() => void>();
 
 function getUniqueFieldNames(fieldNames: string[]): string[] {
@@ -231,6 +243,11 @@ async function cancelJob() {
 
 
 async function getJobTasks(limit: number = 10, offset: number = 0, fieldsToReturn?: string[]): Promise<JobTask[]> {
+  // the level db of the job was deleted, it never comes back, so stop calling the api no matter how many
+  // times the task details component asks for tasks again
+  if (tasksStorageLost.value) {
+    return [];
+  }
   try {
     const res = await callAdminForthApi({
       path: `/plugin/${props.meta.pluginInstanceId}/get-tasks`,
@@ -243,6 +260,9 @@ async function getJobTasks(limit: number = 10, offset: number = 0, fieldsToRetur
       },
     });
     if (res.ok) {
+      if (res.data.storageLost) {
+        tasksStorageLostForJobId.value = props.job.id;
+      }
       const tasks = res.data.tasks as JobTask[];
       const startIndex = offset || 0;
       for (let taskIndex = 0; taskIndex < tasks.length; taskIndex++) {

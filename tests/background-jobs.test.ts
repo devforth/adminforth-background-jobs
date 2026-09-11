@@ -1212,4 +1212,53 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
       ok: true,
     });
   });
+
+  it('reports lost task storage when the level db of a finished job was deleted', async () => {
+    const { plugin } = await createHarness([
+      seedJob({
+        id: 'job-without-storage',
+        name: 'Job without storage',
+        progress: 100,
+        startedBy: 'user-1',
+        status: 'DONE',
+      }),
+      seedJob({
+        id: 'job-without-tasks',
+        name: 'Job without tasks',
+        progress: 100,
+        startedBy: 'user-1',
+        status: 'DONE',
+      }),
+    ]);
+    const endpoints = new Map<string, any>();
+    plugin.setupEndpoints({
+      endpoint: vi.fn((definition: any) => {
+        endpoints.set(`${definition.method} ${definition.path}`, definition.handler);
+      }),
+    } as any);
+    // a job started without tasks still has the `_meta:count` key, so it must not be reported as lost
+    seedTasks('job-without-tasks', []);
+
+    await expect(
+      endpoints.get('POST /plugin/test-plugin/get-tasks')({
+        adminUser: { pk: 'user-1' },
+        body: { jobId: 'job-without-storage', limit: 10, offset: 0 },
+      }),
+    ).resolves.toEqual({
+      data: {
+        message: 'Task storage of job with id job-without-storage was deleted, task details can not be restored.',
+        storageLost: true,
+        tasks: [],
+        total: 0,
+      },
+      ok: true,
+    });
+
+    await expect(
+      endpoints.get('POST /plugin/test-plugin/get-tasks')({
+        adminUser: { pk: 'user-1' },
+        body: { jobId: 'job-without-tasks', limit: 10, offset: 0 },
+      }),
+    ).resolves.toEqual({ data: { tasks: [], total: 0 }, ok: true });
+  });
 });

@@ -1182,6 +1182,22 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         if (!jobLevelDb) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
+        // `_meta:count` is written for every job when it is created, even for a job without tasks, so a
+        // missing key means the LevelDB of the job was deleted (container storage wiped, old job dbs
+        // cleaned up) and task details can not be restored anymore
+        const tasksCountMeta = await jobLevelDb.get('_meta:count');
+        if (!tasksCountMeta) {
+          afLogger.warn(`Task storage for job with id ${jobId} is missing, task details can not be returned.`);
+          return {
+            ok: true,
+            data: {
+              tasks: [],
+              total: 0,
+              storageLost: true,
+              message: `Task storage of job with id ${jobId} was deleted, task details can not be restored.`,
+            },
+          };
+        }
         const tasks = [];
         let taskIndex = 0 + offset;
         while (true) {
