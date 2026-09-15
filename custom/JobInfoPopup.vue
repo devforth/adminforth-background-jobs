@@ -6,7 +6,7 @@
           <Tooltip>
             <p class="text-xs text-gray-600 dark:text-gray-200 h-full">{{ t('Created:') }} {{ getTimeAgoString(new Date(job.createdAt)) }}</p>
             <template #tooltip>
-              {{ t('Created at:') }} {{ new Date(job.createdAt).toLocaleString() }}
+              {{ t('Created at:') }} {{ formatDateTime(job.createdAt) }}
             </template>
           </Tooltip>
         </div>
@@ -28,7 +28,7 @@
           <Tooltip v-if="job.finishedAt">
              <p class="text-xs text-gray-600 dark:text-gray-200 h-full"> {{ t('Finished:') }} {{ getTimeAgoString(new Date(job.finishedAt)) }}</p>
             <template #tooltip>
-              {{ t('Finished at:') }} {{ new Date(job.finishedAt).toLocaleString() }}
+              {{ t('Finished at:') }} {{ formatDateTime(job.finishedAt) }}
             </template>
           </Tooltip>
         </div>
@@ -76,7 +76,7 @@
 import type { IJob } from './utils';
 import { cancelJobById, isJobCancellable } from './utils';
 import { ProgressBar, Button, Tooltip } from '@/afcl';
-import { getTimeAgoString, callAdminForthApi, getCustomComponent} from '@/utils';
+import { getTimeAgoString, callAdminForthApi, getCustomComponent, formatDateTime} from '@/utils';
 import { useI18n } from 'vue-i18n';
 import StateToIcon from './StateToIcon.vue';
 import { useAdminforth } from '@/adminforth';

@@ -62,6 +62,6 @@
     "zod": "^4.3.6"
   },
   "peerDependencies": {
-    "adminforth": "^3.8.2"
+    "adminforth": "^3.22.0"
   }
 }
