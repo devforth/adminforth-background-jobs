@@ -94,6 +94,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private levelDbCloseTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   private jobStateMutexes: Record<string, Mutex> = {};
   private jobQueueMutexes: Record<string, Mutex> = {};
+  private addTasksToRunningJob: Record<string, (firstTaskIndex: number, tasks: taskType[]) => void> = {};
   private deprecatedWarningsShown = new Set<string>();
 
   constructor(options: PluginOptions) {
@@ -654,6 +655,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     });
 
     await Promise.all(createTaskRecordsPromises);
+    // a running job takes the new tasks into free slots of its parallel limit right away, otherwise they are
+    // picked up from storage when the job starts or rescans its unfinished tasks
+    this.addTasksToRunningJob[jobId]?.(currentTotalTasks, tasks);
   }
 
   public async deleteTasksFromExistingJob(
@@ -818,11 +822,36 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     }
 
     const limit = pLimit(parrallelLimit);
-    const tasksToExecute = tasks.map((task, taskIndex) => {
-      return limit(() => taskHandler(taskIndex, task));
-    });
+    let pendingTasks: Promise<void>[] = [];
+    const enqueueTask = (taskIndex: number, task: taskType) => {
+      pendingTasks.push(limit(() => taskHandler(taskIndex, task)));
+    };
+    tasks.forEach((task, taskIndex) => enqueueTask(taskIndex, task));
 
-    await Promise.all(tasksToExecute);
+    this.addTasksToRunningJob[jobId] = (firstTaskIndex, newTasks) => {
+      newTasks.forEach((task, offset) => {
+        const taskIndex = firstTaskIndex + offset;
+        // a run built from storage after the task was saved already has it
+        if (taskIndex >= tasks.length) {
+          enqueueTask(taskIndex, task);
+        }
+      });
+    };
+    try {
+      // tasks enqueued while a batch runs form the next batch, so the loop ends only when nothing is left
+      while (pendingTasks.length > 0) {
+        const tasksBatch = pendingTasks;
+        pendingTasks = [];
+        await Promise.all(tasksBatch);
+      }
+    } catch (error) {
+      // tasks enqueued after the failed batch are not awaited anymore, so their rejections must not go unhandled
+      pendingTasks.forEach((pendingTask) => pendingTask.catch(() => {}));
+      throw error;
+    } finally {
+      delete this.addTasksToRunningJob[jobId];
+    }
+
     if (lastJobStatus === 'CANCELLED') {
       this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
       await this.startQueuedJobsSafely(jobHandlerName);

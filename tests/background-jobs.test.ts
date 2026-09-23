@@ -518,6 +518,33 @@ describe('BackgroundJobsPlugin job processing', () => {
     expect(readTask(jobId, 2)).toEqual({ state: { input: 'added-after-delete' }, status: 'DONE' });
   });
 
+  it('starts tasks added to a running job in free parallel slots without waiting for the running tasks', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler, release, startedTasks } = createGatedHandler();
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'add-while-running', parallelLimit: 2 });
+
+    const jobId = await plugin.startNewJob(
+      'Add while running',
+      { pk: 'user-1' } as any,
+      [{ state: { name: 'slow' } }, { state: { name: 'fast' } }],
+      'add-while-running',
+    );
+    await eventually(() => expect(startedTasks).toEqual(['slow', 'fast']));
+
+    release('fast');
+    await plugin.addNewTasksToExistingJob(jobId, [{ state: { name: 'added' } }]);
+
+    // the slot freed by 'fast' is taken by the added task while 'slow' is still running
+    await eventually(() => expect(startedTasks).toEqual(['slow', 'fast', 'added']));
+    expect(readTask(jobId, 0)).toMatchObject({ status: 'IN_PROGRESS' });
+
+    release('added');
+    release('slow');
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' }));
+    expect(handler).toHaveBeenCalledTimes(3);
+  });
+
   it('finishes with errors when beforeJobFinish fails', async () => {
     const { adminforth, plugin, resource } = await createHarness();
     plugin.registerTaskHandler({
