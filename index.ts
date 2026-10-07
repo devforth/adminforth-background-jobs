@@ -466,7 +466,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     const { parrallelLimit } = jobRunContext;
     const startedBy = adminUser?.pk ?? null;
 
-    const { createdRecord, initialStatus } = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
+    const { createdRecord, initialStatus, jobLevelDb } = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
       const initialStatus: JobStatus = !options.queued && await this.canStartJobImmediately(jobHandlerName)
         ? 'IN_PROGRESS'
         : 'QUEUED';
@@ -484,7 +484,20 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       if (creationResult.ok !== true) {
         throw new Error(`Failed to create a record for the job. Error: ${creationResult.error}`);
       }
-      return { createdRecord: creationResult.createdRecord as Record<string, any>, initialStatus };
+      const createdRecord = creationResult.createdRecord as Record<string, any>;
+
+      // tasks are stored before the queue mutex is released, otherwise startNextQueuedJob could take the QUEUED job
+      // while it has no tasks yet and finish it right away, leaving the tasks written after that unprocessed
+      //create a level db instance for the job with name as jobId
+      const jobLevelDb = await this.getLevelDbForTheJob(createdRecord[this.getResourcePk()]);
+      await jobLevelDb.put('_meta:count', `${tasks.length}`);
+      const limit2 = pLimit(parrallelLimit);
+      const createTaskRecordsPromises = tasks.map((task, index) => {
+        return limit2(() => this.createLevelDbTaskRecord(jobLevelDb, index.toString(), task.state));
+      });
+
+      await Promise.all(createTaskRecordsPromises);
+      return { createdRecord, initialStatus, jobLevelDb };
     });
     const jobId = createdRecord[this.getResourcePk()];
 
@@ -496,16 +509,6 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       createdAt: createdRecord[this.options.createdAtField],
       customComponent,
     });
-
-    //create a level db instance for the job with name as jobId
-    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
-    await jobLevelDb.put('_meta:count', `${tasks.length}`);
-    const limit2 = pLimit(parrallelLimit);
-    const createTaskRecordsPromises = tasks.map((task, index) => {
-      return limit2(() => this.createLevelDbTaskRecord(jobLevelDb, index.toString(), task.state));
-    });
-
-    await Promise.all(createTaskRecordsPromises);
 
     if (initialStatus === 'IN_PROGRESS') {
       this.runProcessingTasks(tasks, jobLevelDb, jobId, jobRunContext).catch((error) => {

@@ -864,6 +864,45 @@ describe('BackgroundJobsPlugin queued jobs', () => {
     await expect(plugin.startNextQueuedJob('manual')).resolves.toBeNull();
   });
 
+  it('does not start a queued job before its tasks are stored', async () => {
+    const { plugin, resource } = await createHarness();
+    const handledTasks: string[] = [];
+    const handler = vi.fn(async ({ getTaskStateField }) => {
+      handledTasks.push(await getTaskStateField('name'));
+    });
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'queued-storage' });
+
+    const countWriteStarted = createDeferred();
+    const countWriteGate = createDeferred();
+    const storeValue = levelMock.Level.prototype.put;
+    vi.spyOn(levelMock.Level.prototype, 'put').mockImplementationOnce(async function (this: any, key: string, value: string) {
+      countWriteStarted.resolve();
+      await countWriteGate.promise;
+      return storeValue.call(this, key, value);
+    });
+
+    const createJob = plugin.queueNewJob(
+      'Queued job',
+      { pk: 'user-1' } as any,
+      [{ state: { name: 'only' } }],
+      'queued-storage',
+      {},
+      { autoStart: false },
+    );
+    await countWriteStarted.promise;
+
+    // the job record already exists while its tasks are still being written
+    const startNext = plugin.startNextQueuedJob('queued-storage');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(resource.records.get('job-1')).toMatchObject({ status: 'QUEUED' });
+    countWriteGate.resolve();
+
+    const jobId = await createJob;
+    await expect(startNext).resolves.toBe(jobId);
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' }));
+    expect(handledTasks).toEqual(['only']);
+  });
+
   it('runs one job per job name at a time and starts the oldest queued job when the running one finishes', async () => {
     const { adminforth, plugin, resource } = await createHarness();
     const { handler, release, startedTasks } = createGatedHandler();
