@@ -624,6 +624,45 @@ describe('BackgroundJobsPlugin job processing', () => {
     expect(handler).toHaveBeenCalledTimes(3);
   });
 
+  it('rejects tasks added while the job writes its final status instead of leaving them unprocessed', async () => {
+    const { plugin, resource } = await createHarness();
+    const handledTasks: string[] = [];
+    const handler = vi.fn(async ({ getTaskStateField }) => {
+      handledTasks.push(await getTaskStateField('name'));
+    });
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'add-while-finishing' });
+
+    const finishWriteStarted = createDeferred();
+    const finishWriteGate = createDeferred();
+    const updateRecord = resource.update.getMockImplementation()!;
+    resource.update.mockImplementation(async (id, patch) => {
+      if (patch.status === 'DONE') {
+        finishWriteStarted.resolve();
+        await finishWriteGate.promise;
+      }
+      return updateRecord(id, patch);
+    });
+
+    const jobId = await plugin.startNewJob(
+      'Add while finishing',
+      { pk: 'user-1' } as any,
+      [{ state: { name: 'first' } }],
+      'add-while-finishing',
+    );
+    await finishWriteStarted.promise;
+
+    // the job has already scanned its tasks for the last time and is writing DONE
+    const addTasks = plugin.addNewTasksToExistingJob(jobId, [{ state: { name: 'second' } }]);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    finishWriteGate.resolve();
+
+    await expect(addTasks).rejects.toThrow('Cannot add tasks to a job with status DONE');
+    expect(handledTasks).toEqual(['first']);
+    expect(getJobStore(jobId).get('_meta:count')).toBe('1');
+    expect(readTask(jobId, 1)).toBeUndefined();
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' });
+  });
+
   it('finishes with errors when beforeJobFinish fails', async () => {
     const { adminforth, plugin, resource } = await createHarness();
     plugin.registerTaskHandler({

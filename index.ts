@@ -94,6 +94,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private levelDbCloseTimers: Record<string, ReturnType<typeof setTimeout>> = {};
   private jobStateMutexes: Record<string, Mutex> = {};
   private jobQueueMutexes: Record<string, Mutex> = {};
+  private jobTasksMutexes: Record<string, Mutex> = {};
   private addTasksToRunningJob: Record<string, (firstTaskIndex: number, tasks: taskType[]) => void> = {};
   private deprecatedWarningsShown = new Set<string>();
 
@@ -161,8 +162,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         this.forgetLevelDb(recordId);
       }
 
-      // cleanup per-job mutex as well
+      // cleanup per-job mutexes as well
       delete this.jobStateMutexes[recordId];
+      delete this.jobTasksMutexes[recordId];
 
       //delete level db folder for the job
       await fs.rm(levelDbPath, {
@@ -178,6 +180,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     // Keep mutex while job is active to preserve atomicity between concurrent tasks.
     if (TERMINAL_JOB_STATUSES.includes(status)) {
       delete this.jobStateMutexes[jobId];
+      // safe to drop even while held: the terminal status is already stored, so a caller who creates a new
+      // mutex for this job reads that status and rejects the new tasks
+      delete this.jobTasksMutexes[jobId];
     }
   }
 
@@ -536,6 +541,19 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return mutex;
   }
 
+  /**
+   * Taken by addNewTasksToExistingJob and by the last unfinished-task scan with the terminal status write of a job,
+   * so a task is either added before that scan and processed, or rejected because the job is already finished.
+   */
+  private getJobTasksMutex(jobId: string): Mutex {
+    let mutex = this.jobTasksMutexes[jobId];
+    if (!mutex) {
+      mutex = new Mutex();
+      this.jobTasksMutexes[jobId] = mutex;
+    }
+    return mutex;
+  }
+
   private async listJobsByStatus(
     jobHandlerName: string,
     status: JobStatus,
@@ -638,26 +656,28 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     jobId: string,
     tasks: taskType[],
   ) {
-    const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
-    if (!jobRecord) {
-      throw new Error(`Job with id ${jobId} not found.`);
-    }
-    const jobStatus = jobRecord[this.options.statusField];
-    if (jobStatus !== 'IN_PROGRESS' && jobStatus !== 'QUEUED') {
-      throw new Error(`Cannot add tasks to a job with status ${jobStatus}. Only jobs with status IN_PROGRESS or QUEUED can be added new tasks.`);
-    }
-    const jobLevelDb = await this.getLevelDbForTheJob(jobId);
-    const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
-    const newTotalTasks = currentTotalTasks + tasks.length;
-    await jobLevelDb.put('_meta:count', `${newTotalTasks}`);
-    const createTaskRecordsPromises = tasks.map((task, index) => {
-      return this.createLevelDbTaskRecord(jobLevelDb, (currentTotalTasks + index).toString(), task.state);
-    });
+    await this.getJobTasksMutex(jobId).runExclusive(async () => {
+      const jobRecord = await this.adminforth.resource(this.getResourceId()).get(Filters.EQ(this.getResourcePk(), jobId));
+      if (!jobRecord) {
+        throw new Error(`Job with id ${jobId} not found.`);
+      }
+      const jobStatus = jobRecord[this.options.statusField];
+      if (jobStatus !== 'IN_PROGRESS' && jobStatus !== 'QUEUED') {
+        throw new Error(`Cannot add tasks to a job with status ${jobStatus}. Only jobs with status IN_PROGRESS or QUEUED can be added new tasks.`);
+      }
+      const jobLevelDb = await this.getLevelDbForTheJob(jobId);
+      const currentTotalTasks = await this.getTotalTasksInLevelDb(jobLevelDb);
+      const newTotalTasks = currentTotalTasks + tasks.length;
+      await jobLevelDb.put('_meta:count', `${newTotalTasks}`);
+      const createTaskRecordsPromises = tasks.map((task, index) => {
+        return this.createLevelDbTaskRecord(jobLevelDb, (currentTotalTasks + index).toString(), task.state);
+      });
 
-    await Promise.all(createTaskRecordsPromises);
-    // a running job takes the new tasks into free slots of its parallel limit right away, otherwise they are
-    // picked up from storage when the job starts or rescans its unfinished tasks
-    this.addTasksToRunningJob[jobId]?.(currentTotalTasks, tasks);
+      await Promise.all(createTaskRecordsPromises);
+      // a running job takes the new tasks into free slots of its parallel limit right away, otherwise they are
+      // picked up from storage when the job starts or rescans its unfinished tasks
+      this.addTasksToRunningJob[jobId]?.(currentTotalTasks, tasks);
+    });
   }
 
   public async deleteTasksFromExistingJob(
@@ -883,27 +903,32 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         return;
       }
 
-      const unfinishedTasksAfterFinishCallback = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
+      // the last scan and the terminal status write hold the job tasks mutex, so addNewTasksToExistingJob can not
+      // store a task between them which nobody would process
+      const { unfinishedTasksAfterFinishCallback, finalStatus } = await this.getJobTasksMutex(jobId).runExclusive(async () => {
+        const unfinishedTasksAfterFinishCallback = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
+        if (unfinishedTasksAfterFinishCallback.length > 0) {
+          return { unfinishedTasksAfterFinishCallback, finalStatus: null };
+        }
+        const allTasksDoneStatus = await this.getAllTasksDoneStatus(jobLevelDb);
+        const finalStatus: JobStatus = allTasksDoneStatus.failedTasks === 0 ? 'DONE' : 'DONE_WITH_ERRORS';
+        await this.adminforth.resource(this.getResourceId()).update(jobId, {
+          [this.options.statusField]: finalStatus,
+          [this.options.finishedAtField]: (new Date()).toISOString(),
+        })
+        return { unfinishedTasksAfterFinishCallback, finalStatus };
+      });
       if (unfinishedTasksAfterFinishCallback.length > 0) {
         const tasksToReprocess = await this.buildTasksToReprocess(jobLevelDb, unfinishedTasksAfterFinishCallback);
         await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, nextFinishAttemptNumber);
         return;
       }
 
-      const allTasksDoneStatus = await this.getAllTasksDoneStatus(jobLevelDb);
-      if (allTasksDoneStatus.failedTasks === 0) {
-        await this.adminforth.resource(this.getResourceId()).update(jobId, {
-          [this.options.statusField]: 'DONE',
-          [this.options.finishedAtField]: (new Date()).toISOString(),
-        })
+      if (finalStatus === 'DONE') {
         this.publishJobUpdate({ jobId, status: 'DONE', finishedAt: (new Date()).toISOString() });
         this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE');
         await this.triggerOnAllTasksDone(onAllTasksDone, jobLevelDb, jobId);
       } else {
-        await this.adminforth.resource(this.getResourceId()).update(jobId, {
-          [this.options.statusField]: 'DONE_WITH_ERRORS',
-          [this.options.finishedAtField]: (new Date()).toISOString(),
-        })
         const jobError = await this.getJobStateField(jobId, 'error');
         this.publishJobUpdate({ jobId, status: 'DONE_WITH_ERRORS', finishedAt: (new Date()).toISOString(), error: jobError });
         this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
