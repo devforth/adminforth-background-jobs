@@ -1125,6 +1125,22 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
     expect(readTask('job-add', 3)).toEqual({ state: { input: 4 }, status: 'SCHEDULED' });
   });
 
+  it('keeps every task of concurrent appends to the same job under its own index', async () => {
+    const { plugin } = await createHarness([seedJob({ id: 'job-concurrent-add' })]);
+    seedTasks('job-concurrent-add', []);
+
+    await Promise.all([
+      plugin.addNewTasksToExistingJob('job-concurrent-add', [{ state: { name: 'A' } }]),
+      plugin.addNewTasksToExistingJob('job-concurrent-add', [{ state: { name: 'B' } }]),
+    ]);
+
+    expect(getJobStore('job-concurrent-add').get('_meta:count')).toBe('2');
+    expect([readTask('job-concurrent-add', 0), readTask('job-concurrent-add', 1)]).toEqual([
+      { state: { name: 'A' }, status: 'SCHEDULED' },
+      { state: { name: 'B' }, status: 'SCHEDULED' },
+    ]);
+  });
+
   it('validates add task preconditions', async () => {
     const { plugin } = await createHarness([seedJob({ id: 'job-done', status: 'DONE' })]);
 
