@@ -2,46 +2,39 @@
   <div class="relative" ref="dropdownRef">
     <button
       type="button"
-      class="relative flex cursor-pointer flex-col items-stretch justify-center text-lightNavbarIcons transition-transform hover:scale-110 dark:text-darkNavbarIcons"
+      class="relative flex h-10 cursor-pointer items-center gap-2 overflow-hidden rounded-full border pl-3.5 transition-colors"
+      :class="isAlLeastOneJobRunning
+        ? 'pr-2 bg-lightSecondary border-lightPrimary/45 ring-[3px] ring-lightPrimary/10 text-lightPrimary dark:bg-darkSecondary dark:border-darkPrimary/45 dark:ring-darkPrimary/10 dark:text-darkPrimary'
+        : 'pr-4 shadow-sm bg-lightSecondary border-lightSecondaryContrast/15 text-lightNavbarIcons hover:bg-lightSecondaryDarken dark:bg-darkSecondary dark:border-darkSecondaryContrast/15 dark:text-darkNavbarIcons dark:hover:bg-darkSecondaryLighten'"
       :aria-expanded="isDropdownOpen"
       :aria-label="t('Jobs')"
       @click="toggleJobsDropdown"
     >
-      <div class="flex items-end justify-center gap-1">
-        <div v-if="jobs.length > 0" class="relative flex items-center justify-center">
-          <Tooltip>
-            <IconCheckCircleOutline class="w-6 h-6" />
-            <template #tooltip>
-              {{ isAlLeastOneJobRunning ? t('Jobs in progress') : t('All jobs completed') }}
-            </template>
-          </Tooltip>
-          <div
-            v-if="isAlLeastOneJobRunning"
-            class="ping-animation absolute -right-2 -top-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
-          >
-            {{ jobsCount }}
-          </div>
-          <div
-            v-if="isAlLeastOneJobRunning"
-            class="absolute -right-2 -top-1 rounded-full bg-lightPrimary w-4 h-4 text-xs flex items-center justify-center text-white"
-          >
-            {{ jobsCount }}
-          </div>
-        </div>
-        <span class="relative bottom-[0.1875rem] text-sm leading-none">
-          {{ t('Jobs') }}
-        </span>
-      </div>
-      <ProgressBar
+      <Tooltip>
+        <IconCog6Tooth
+          class="w-5 h-5"
+          :class="{ 'animate-[spin_3s_linear_infinite] motion-reduce:animate-none': isAlLeastOneJobRunning }"
+        />
+        <template #tooltip>
+          {{ isAlLeastOneJobRunning ? t('Jobs in progress') : t('All jobs completed') }}
+        </template>
+      </Tooltip>
+      <span
+        class="jobs-label text-sm font-semibold text-lightPrimary dark:text-darkPrimary"
+        :class="{ 'jobs-label--pulse': isAlLeastOneJobRunning }"
+      >
+        {{ t('Jobs') }}
+      </span>
+      <span
         v-if="isAlLeastOneJobRunning"
-        class="mt-1 w-full !h-1 [&>div]:!h-1"
-        :current-value="overallProgress"
-        :max-value="100"
-        :min-value="0"
-        :showAnimation="true"
-        :showLabels="false"
-        :showValues="false"
-        :show-progress="false"
+        class="flex h-6 min-w-6 items-center justify-center rounded-full px-2 text-xs font-bold tabular-nums bg-lightPrimary/15 dark:bg-darkPrimary/20"
+      >
+        {{ jobsCount }}
+      </span>
+      <span
+        v-if="isAlLeastOneJobRunning"
+        class="absolute bottom-0 left-0 h-0.5 bg-lightPrimary transition-[width] duration-500 dark:bg-darkPrimary"
+        :style="{ width: `${overallProgress}%` }"
       />
     </button>
     <Transition
@@ -70,8 +63,8 @@
 <script setup lang="ts">
   import type { AdminUser } from 'adminforth';
   import { onMounted, onUnmounted, ref, computed } from 'vue';
-  import { ProgressBar, Tooltip } from '@/afcl';
-  import { IconCheckCircleOutline } from '@iconify-prerendered/vue-flowbite';
+  import { Tooltip } from '@/afcl';
+  import { IconCog6Tooth } from '@iconify-prerendered/vue-heroicons';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
   import type { IJob } from './utils';
@@ -198,14 +191,36 @@
 
 
 <style scoped lang="scss">
-.ping-animation {
-  animation: ping 1s cubic-bezier(0, 0, 1, 1) infinite;
+// the label always glows with the theme primary color, and pulses while jobs are running
+.jobs-label {
+  --jobs-glow: theme('colors.lightPrimary');
+  text-shadow: 0 0 10px color-mix(in srgb, var(--jobs-glow) 55%, transparent);
 }
 
-@keyframes ping {
-  75%, 100% {
-    transform: scale(2);
-    opacity: 0;
+.dark .jobs-label {
+  --jobs-glow: theme('colors.darkPrimary');
+}
+
+.jobs-label--pulse {
+  animation: jobs-glow 1.8s ease-in-out infinite;
+}
+
+@keyframes jobs-glow {
+  0%, 100% {
+    text-shadow:
+      0 0 4px color-mix(in srgb, var(--jobs-glow) 40%, transparent),
+      0 0 10px color-mix(in srgb, var(--jobs-glow) 25%, transparent);
+  }
+  50% {
+    text-shadow:
+      0 0 6px color-mix(in srgb, var(--jobs-glow) 90%, transparent),
+      0 0 18px color-mix(in srgb, var(--jobs-glow) 65%, transparent);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jobs-label--pulse {
+    animation: none;
   }
 }
 </style>
