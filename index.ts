@@ -19,7 +19,7 @@ const getTasksBodySchema = z.object({
   fieldsToReturn: z.array(z.string()).optional(),
 }).strict();
 
-type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED';
+type TaskStatus = 'SCHEDULED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'DELETED';
 type JobStatus = 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'DONE_WITH_ERRORS' | 'CANCELLED';
 const TERMINAL_JOB_STATUSES: JobStatus[] = ['DONE', 'DONE_WITH_ERRORS', 'CANCELLED'];
 const DEFAULT_PARALLEL_LIMIT = 3;
@@ -680,12 +680,14 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     if (taskIndex >= currentTotalTasks) {
       throw new Error(`Invalid task index ${taskIndex}.`);
     }
-    for (let indexToMove = taskIndex + 1; indexToMove < currentTotalTasks; indexToMove++) {
-      const taskToMove = await jobLevelDb.get(indexToMove.toString());
-      await jobLevelDb.put((indexToMove - 1).toString(), taskToMove);
+    const taskStatus = await this.getLevelDbTaskStatusField(jobLevelDb, taskIndex.toString());
+    if (taskStatus === 'IN_PROGRESS') {
+      throw new Error(`Cannot delete task ${taskIndex} because it is already in progress.`);
     }
-    await jobLevelDb.del((currentTotalTasks - 1).toString());
-    await jobLevelDb.put('_meta:count', `${currentTotalTasks - 1}`);
+    // running workers address their task by its index, so the task is only marked as deleted and keeps its
+    // index, removing it would shift the following tasks under the workers which are processing them
+    await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'DELETED');
+    this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: 'DELETED' });
   }
 
   private async getUnfinishedTasksFromLevelDb(levelDb: Level): Promise<indexedTaskType[]> {
@@ -747,10 +749,12 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         afLogger.debug(`Job ${jobId} was cancelled. Skipping task ${taskIndex}.`);
         return;
       }
-      // check if task is still exists in level db, because it can be deleted while processing
+      // the task can be deleted while it waits for a free slot
       const taskStatus = await this.getLevelDbTaskStatusField(jobLevelDb, taskIndex.toString());
-      if (!taskStatus) {
+      if (taskStatus === 'DELETED') {
         afLogger.debug(`Task ${taskIndex} of job ${jobId} was deleted. Skipping processing.`);
+        // a deleted task stays in the total task count, so it has to be counted as finished for the progress
+        await finishTask();
         return;
       }
       const getState = async () => {

@@ -43,12 +43,18 @@
       {{ t('Scheduled') }}
     </template>
   </Tooltip>
+  <Tooltip v-else-if="status === 'DELETED'">
+    <IconTrashBinOutline class="w-6 h-6 ml-2 text-gray-400" />
+    <template #tooltip>
+      {{ t('Deleted') }}
+    </template>
+  </Tooltip>
 </template>
 
 
 <script setup lang="ts">
   import type { IJob } from './utils';
-  import { IconCheckCircleOutline, IconCloseCircleOutline, IconExclamationCircleOutline, IconClockOutline } from '@iconify-prerendered/vue-flowbite';
+  import { IconCheckCircleOutline, IconCloseCircleOutline, IconExclamationCircleOutline, IconClockOutline, IconTrashBinOutline } from '@iconify-prerendered/vue-flowbite';
   import { Spinner, Tooltip } from '@/afcl';
   import { useI18n } from 'vue-i18n';
 
@@ -56,7 +62,7 @@
 
   const props = defineProps<{
     job?: IJob;
-    status?: 'SCHEDULED' | 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS';
+    status?: 'SCHEDULED' | 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS' | 'DELETED';
     error?: string;
   }>();
 </script>

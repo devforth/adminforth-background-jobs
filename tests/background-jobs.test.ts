@@ -513,9 +513,88 @@ describe('BackgroundJobsPlugin job processing', () => {
 
     expect(handledInputs).toEqual(['first', 'deleted', 'third', 'added-after-delete']);
     expect(beforeJobFinish).toHaveBeenCalledTimes(2);
-    expect(getJobStore(jobId).get('_meta:count')).toBe('3');
-    expect(readTask(jobId, 1)).toEqual({ state: { input: 'third' }, status: 'DONE' });
-    expect(readTask(jobId, 2)).toEqual({ state: { input: 'added-after-delete' }, status: 'DONE' });
+    expect(getJobStore(jobId).get('_meta:count')).toBe('4');
+    expect(readTask(jobId, 1)).toEqual({ state: { input: 'deleted' }, status: 'DELETED' });
+    expect(readTask(jobId, 2)).toEqual({ state: { input: 'third' }, status: 'DONE' });
+    expect(readTask(jobId, 3)).toEqual({ state: { input: 'added-after-delete' }, status: 'DONE' });
+  });
+
+  it('keeps every running task writing to its own task when an earlier task is deleted', async () => {
+    const { plugin, resource } = await createHarness();
+    const handledInputs: string[] = [];
+    const secondTaskStarted = createDeferred();
+    const secondTaskGate = createDeferred();
+
+    plugin.registerTaskHandler({
+      handler: async ({ getTaskStateField, setTaskStateField }) => {
+        const input = await getTaskStateField('input');
+        handledInputs.push(input);
+        if (input === 'second') {
+          secondTaskStarted.resolve();
+          await secondTaskGate.promise;
+        }
+        await setTaskStateField('result', `${input}-result`);
+      },
+      jobHandlerName: 'delete-while-running',
+      parallelLimit: 1,
+    });
+
+    const jobId = await plugin.startNewJob(
+      'Delete while running',
+      { pk: 'user-1' } as any,
+      [{ state: { input: 'first' } }, { state: { input: 'second' } }, { state: { input: 'third' } }],
+      'delete-while-running',
+    );
+
+    await secondTaskStarted.promise;
+    await expect(plugin.deleteTasksFromExistingJob(jobId, 1)).rejects.toThrow(
+      'Cannot delete task 1 because it is already in progress.',
+    );
+    await plugin.deleteTasksFromExistingJob(jobId, 0);
+    secondTaskGate.resolve();
+
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' }));
+
+    expect(handledInputs).toEqual(['first', 'second', 'third']);
+    expect(readTask(jobId, 0)).toEqual({ state: { input: 'first', result: 'first-result' }, status: 'DELETED' });
+    expect(readTask(jobId, 1)).toEqual({ state: { input: 'second', result: 'second-result' }, status: 'DONE' });
+    expect(readTask(jobId, 2)).toEqual({ state: { input: 'third', result: 'third-result' }, status: 'DONE' });
+  });
+
+  it('skips a task deleted while it waits for a free slot and still completes the progress', async () => {
+    const { plugin, resource } = await createHarness();
+    const handledInputs: string[] = [];
+    const firstTaskStarted = createDeferred();
+    const firstTaskGate = createDeferred();
+
+    plugin.registerTaskHandler({
+      handler: async ({ getTaskStateField }) => {
+        const input = await getTaskStateField('input');
+        handledInputs.push(input);
+        if (input === 'first') {
+          firstTaskStarted.resolve();
+          await firstTaskGate.promise;
+        }
+      },
+      jobHandlerName: 'delete-waiting',
+      parallelLimit: 1,
+    });
+
+    const jobId = await plugin.startNewJob(
+      'Delete waiting task',
+      { pk: 'user-1' } as any,
+      [{ state: { input: 'first' } }, { state: { input: 'second' } }],
+      'delete-waiting',
+    );
+
+    await firstTaskStarted.promise;
+    await plugin.deleteTasksFromExistingJob(jobId, 1);
+    firstTaskGate.resolve();
+
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ progress: 100, status: 'DONE' }));
+
+    expect(handledInputs).toEqual(['first']);
+    expect(readTask(jobId, 1)).toEqual({ state: { input: 'second' }, status: 'DELETED' });
   });
 
   it('starts tasks added to a running job in free parallel slots without waiting for the running tasks', async () => {
@@ -979,8 +1058,8 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
     );
   });
 
-  it('deletes tasks from an in-progress job and compacts indexes', async () => {
-    const { plugin } = await createHarness([seedJob({ id: 'job-delete' })]);
+  it('marks a task of an in-progress job as deleted and keeps the indexes of the other tasks', async () => {
+    const { adminforth, plugin } = await createHarness([seedJob({ id: 'job-delete' })]);
     seedTasks('job-delete', [
       { state: { input: 1 }, status: 'DONE' },
       { state: { input: 2 }, status: 'SCHEDULED' },
@@ -989,10 +1068,14 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
 
     await plugin.deleteTasksFromExistingJob('job-delete', 1);
 
-    expect(getJobStore('job-delete').get('_meta:count')).toBe('2');
+    expect(getJobStore('job-delete').get('_meta:count')).toBe('3');
     expect(readTask('job-delete', 0)).toEqual({ state: { input: 1 }, status: 'DONE' });
-    expect(readTask('job-delete', 1)).toEqual({ state: { input: 3 }, status: 'SCHEDULED' });
-    expect(readTask('job-delete', 2)).toBeUndefined();
+    expect(readTask('job-delete', 1)).toEqual({ state: { input: 2 }, status: 'DELETED' });
+    expect(readTask('job-delete', 2)).toEqual({ state: { input: 3 }, status: 'SCHEDULED' });
+    expect(adminforth.websocket.publish).toHaveBeenCalledWith('/background-jobs-task-update/job-delete', {
+      status: 'DELETED',
+      taskIndex: 1,
+    });
   });
 
   it('validates delete task preconditions', async () => {
@@ -1000,12 +1083,18 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
       seedJob({ id: 'job-delete-active' }),
       seedJob({ id: 'job-delete-done', status: 'DONE' }),
     ]);
-    seedTasks('job-delete-active', [{ state: { input: 1 }, status: 'SCHEDULED' }]);
+    seedTasks('job-delete-active', [
+      { state: { input: 1 }, status: 'SCHEDULED' },
+      { state: { input: 2 }, status: 'IN_PROGRESS' },
+    ]);
     seedTasks('job-delete-done', [{ state: { input: 1 }, status: 'SCHEDULED' }]);
 
     await expect(plugin.deleteTasksFromExistingJob('job-delete-active', -1)).rejects.toThrow('Invalid task index -1.');
     await expect(plugin.deleteTasksFromExistingJob('missing-job', 0)).rejects.toThrow('Job with id missing-job not found.');
-    await expect(plugin.deleteTasksFromExistingJob('job-delete-active', 1)).rejects.toThrow('Invalid task index 1.');
+    await expect(plugin.deleteTasksFromExistingJob('job-delete-active', 2)).rejects.toThrow('Invalid task index 2.');
+    await expect(plugin.deleteTasksFromExistingJob('job-delete-active', 1)).rejects.toThrow(
+      'Cannot delete task 1 because it is already in progress.',
+    );
     await expect(plugin.deleteTasksFromExistingJob('job-delete-done', 0)).rejects.toThrow(
       'Cannot delete tasks from a job with status DONE',
     );
