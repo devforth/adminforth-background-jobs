@@ -1205,21 +1205,31 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         if (!currentJob) {
           return { ok: false, message: `Job with id ${jobId} not found.` };
         }
-        const oldStatus = currentJob[this.options.statusField];
-        if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
-          return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
-        }
+        const jobHandlerName = currentJob[this.options.jobHandlerField];
         try {
-          await this.adminforth.resource(this.getResourceId()).update(jobId, {
-            [this.options.statusField]: 'CANCELLED',
-            [this.options.finishedAtField]: (new Date()).toISOString(),
+          // startNextQueuedJob reads a QUEUED job and promotes it under the same queue mutex, so the status is
+          // checked and CANCELLED is written under it too, otherwise a promotion could overwrite CANCELLED with IN_PROGRESS
+          const cancelResult = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
+            const oldStatus = (await this.getJobById(jobId))[this.options.statusField];
+            if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
+              return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
+            }
+            await this.adminforth.resource(this.getResourceId()).update(jobId, {
+              [this.options.statusField]: 'CANCELLED',
+              [this.options.finishedAtField]: (new Date()).toISOString(),
+            });
+            this.publishJobUpdate({
+              jobId,
+              status: 'CANCELLED',
+            });
+            return { ok: true };
           });
-          this.publishJobUpdate({
-            jobId,
-            status: 'CANCELLED',
-          });
-          // a cancelled job frees its concurrency slot, so the next queued job of the same handler can start
-          await this.startQueuedJobsSafely(currentJob[this.options.jobHandlerField]);
+          if (!cancelResult.ok) {
+            return cancelResult;
+          }
+          // a cancelled job frees its concurrency slot, so the next queued job of the same handler can start;
+          // runs after the queue mutex is released because startNextQueuedJob takes it again and it is not reentrant
+          await this.startQueuedJobsSafely(jobHandlerName);
           return { ok: true };
         } catch (error) {
           return { ok: false, message: `Failed to cancel job with id ${jobId}.` };

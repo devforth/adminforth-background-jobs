@@ -1055,6 +1055,107 @@ describe('BackgroundJobsPlugin queued jobs', () => {
     expect(startedTasks).toEqual(['running']);
   });
 
+  it('cancels a queued job after its in-flight promotion instead of letting the promotion overwrite CANCELLED', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const { handler, release } = createGatedHandler();
+    const endpoints = new Map<string, any>();
+    const server = {
+      endpoint: vi.fn((definition: any) => {
+        endpoints.set(`${definition.method} ${definition.path}`, definition.handler);
+      }),
+    };
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'promotion-race', parallelLimit: 1 });
+    plugin.setupEndpoints(server as any);
+
+    const jobId = await plugin.queueNewJob(
+      'Sync',
+      { pk: 'user-1' } as any,
+      [{ state: { name: 'only' } }],
+      'promotion-race',
+      {},
+      { autoStart: false },
+    );
+
+    const promotionWriteStarted = createDeferred();
+    const promotionWriteGate = createDeferred();
+    const updateRecord = resource.update.getMockImplementation()!;
+    resource.update.mockImplementation(async (id: string, patch: Record<string, any>) => {
+      if (patch.status === 'IN_PROGRESS') {
+        promotionWriteStarted.resolve();
+        await promotionWriteGate.promise;
+      }
+      return updateRecord(id, patch);
+    });
+
+    const promotion = plugin.startNextQueuedJob('promotion-race');
+    await promotionWriteStarted.promise;
+
+    // the promotion already took the QUEUED job, so the cancellation waits for it instead of writing CANCELLED in between
+    const cancellation = endpoints.get('POST /plugin/test-plugin/cancel-job')({ adminUser: { pk: 'user-1' }, body: { jobId } });
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'QUEUED' });
+    promotionWriteGate.resolve();
+
+    await expect(promotion).resolves.toBe(jobId);
+    await expect(cancellation).resolves.toEqual({ ok: true });
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'CANCELLED' });
+    const jobStatuses = adminforth.websocket.publish.mock.calls
+      .filter(([path, payload]) => path === '/background-jobs-job-update' && payload.jobId === jobId)
+      .map(([, payload]) => payload.status);
+    expect(jobStatuses).toEqual(['QUEUED', 'IN_PROGRESS', 'CANCELLED']);
+
+    release('only');
+  });
+
+  it('does not start a queued job whose cancellation is in flight', async () => {
+    const { plugin, resource } = await createHarness();
+    const { handler } = createGatedHandler();
+    const endpoints = new Map<string, any>();
+    const server = {
+      endpoint: vi.fn((definition: any) => {
+        endpoints.set(`${definition.method} ${definition.path}`, definition.handler);
+      }),
+    };
+
+    plugin.registerTaskHandler({ handler, jobHandlerName: 'cancel-race', parallelLimit: 1 });
+    plugin.setupEndpoints(server as any);
+
+    const jobId = await plugin.queueNewJob(
+      'Sync',
+      { pk: 'user-1' } as any,
+      [{ state: { name: 'only' } }],
+      'cancel-race',
+      {},
+      { autoStart: false },
+    );
+
+    const cancelWriteStarted = createDeferred();
+    const cancelWriteGate = createDeferred();
+    const updateRecord = resource.update.getMockImplementation()!;
+    resource.update.mockImplementation(async (id: string, patch: Record<string, any>) => {
+      if (patch.status === 'CANCELLED') {
+        cancelWriteStarted.resolve();
+        await cancelWriteGate.promise;
+      }
+      return updateRecord(id, patch);
+    });
+
+    const cancellation = endpoints.get('POST /plugin/test-plugin/cancel-job')({ adminUser: { pk: 'user-1' }, body: { jobId } });
+    await cancelWriteStarted.promise;
+
+    // the cancellation already checked the job, so the promotion waits for it instead of taking the job in between
+    const promotion = plugin.startNextQueuedJob('cancel-race');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(handler).not.toHaveBeenCalled();
+    cancelWriteGate.resolve();
+
+    await expect(cancellation).resolves.toEqual({ ok: true });
+    await expect(promotion).resolves.toBeNull();
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'CANCELLED' });
+    expect(handler).not.toHaveBeenCalled();
+  });
+
   it('resumes active jobs on startup and starts queued jobs only for handlers without an active job', async () => {
     const { plugin, resource } = await createHarness([
       seedJob({ createdAt: '2026-06-11T00:00:01.000Z', id: 'job-resumed', jobHandler: 'busy', status: 'IN_PROGRESS' }),
