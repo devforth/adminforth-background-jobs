@@ -1311,6 +1311,57 @@ describe('BackgroundJobsPlugin public job and task APIs', () => {
       value: 'done',
     });
   });
+
+  it('keeps atomic job state updates exclusive when the job finishes while an update is running', async () => {
+    const { plugin, resource } = await createHarness();
+    const taskGate = createDeferred();
+    plugin.registerTaskHandler({
+      handler: async () => {
+        await taskGate.promise;
+      },
+      jobHandlerName: 'update-while-finishing',
+    });
+
+    const jobId = await plugin.startNewJob(
+      'Update while finishing',
+      { pk: 'user-1' } as any,
+      [{ state: {} }],
+      'update-while-finishing',
+      { counter: 0 },
+    );
+
+    let activeUpdates = 0;
+    let maxActiveUpdates = 0;
+    const incrementCounter = (beforeWrite: () => Promise<void>) =>
+      plugin.updateJobFieldsAtomically(jobId, async () => {
+        activeUpdates++;
+        maxActiveUpdates = Math.max(maxActiveUpdates, activeUpdates);
+        const counter = await plugin.getJobStateField(jobId, 'counter');
+        await beforeWrite();
+        await plugin.setJobStateField(jobId, 'counter', counter + 1);
+        activeUpdates--;
+      });
+
+    const firstUpdateRead = createDeferred();
+    const firstUpdateGate = createDeferred();
+    const firstUpdate = incrementCounter(async () => {
+      firstUpdateRead.resolve();
+      await firstUpdateGate.promise;
+    });
+    await firstUpdateRead.promise;
+
+    // the job finishes while the first update still holds the job state mutex
+    taskGate.resolve();
+    await eventually(() => expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' }));
+
+    const secondUpdate = incrementCounter(async () => {});
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    firstUpdateGate.resolve();
+    await Promise.all([firstUpdate, secondUpdate]);
+
+    expect(maxActiveUpdates).toBe(1);
+    expect(await plugin.getJobStateField(jobId, 'counter')).toBe(2);
+  });
 });
 
 describe('BackgroundJobsPlugin REST endpoint handlers', () => {

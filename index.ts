@@ -163,7 +163,6 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       }
 
       // cleanup per-job mutexes as well
-      delete this.jobStateMutexes[recordId];
       delete this.jobTasksMutexes[recordId];
 
       //delete level db folder for the job
@@ -179,7 +178,6 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private cleanupJobMutexIfTerminalStatus(jobId: string, status: JobStatus) {
     // Keep mutex while job is active to preserve atomicity between concurrent tasks.
     if (TERMINAL_JOB_STATUSES.includes(status)) {
-      delete this.jobStateMutexes[jobId];
       // safe to drop even while held: the terminal status is already stored, so a caller who creates a new
       // mutex for this job reads that status and rejects the new tasks
       delete this.jobTasksMutexes[jobId];
@@ -1086,9 +1084,17 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       this.jobStateMutexes[jobId] = mutex;
     }
 
-    return mutex.runExclusive(async () => {
-      await updateFunction();
-    });
+    try {
+      return await mutex.runExclusive(async () => {
+        await updateFunction();
+      });
+    } finally {
+      // drop the mutex only when nobody holds or waits for it, otherwise the next caller would create a second
+      // mutex for the same job and run its update concurrently with the current owner
+      if (!mutex.isLocked() && this.jobStateMutexes[jobId] === mutex) {
+        delete this.jobStateMutexes[jobId];
+      }
+    }
   }
 
   private async processAllUnfinishedJobs() {
