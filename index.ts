@@ -906,10 +906,15 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
 
       // the last scan and the terminal status write hold the job tasks mutex, so addNewTasksToExistingJob can not
       // store a task between them which nobody would process
-      const { unfinishedTasksAfterFinishCallback, finalStatus } = await this.getJobTasksMutex(jobId).runExclusive(async () => {
+      const { unfinishedTasksAfterFinishCallback, finalStatus, terminalStatus } = await this.getJobTasksMutex(jobId).runExclusive(async () => {
         const unfinishedTasksAfterFinishCallback = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
         if (unfinishedTasksAfterFinishCallback.length > 0) {
-          return { unfinishedTasksAfterFinishCallback, finalStatus: null };
+          return { unfinishedTasksAfterFinishCallback, finalStatus: null, terminalStatus: null };
+        }
+        // re-read under the mutex: a cancellation may have committed while the tasks were scanned
+        const statusNow = await this.getLastJobStatus(jobId) as JobStatus;
+        if (TERMINAL_JOB_STATUSES.includes(statusNow)) {
+          return { unfinishedTasksAfterFinishCallback, finalStatus: null, terminalStatus: statusNow };
         }
         const allTasksDoneStatus = await this.getAllTasksDoneStatus(jobLevelDb);
         const finalStatus: JobStatus = allTasksDoneStatus.failedTasks === 0 ? 'DONE' : 'DONE_WITH_ERRORS';
@@ -917,11 +922,16 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           [this.options.statusField]: finalStatus,
           [this.options.finishedAtField]: (new Date()).toISOString(),
         })
-        return { unfinishedTasksAfterFinishCallback, finalStatus };
+        return { unfinishedTasksAfterFinishCallback, finalStatus, terminalStatus: null };
       });
       if (unfinishedTasksAfterFinishCallback.length > 0) {
         const tasksToReprocess = await this.buildTasksToReprocess(jobLevelDb, unfinishedTasksAfterFinishCallback);
         await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, nextFinishAttemptNumber);
+        return;
+      }
+      if (terminalStatus) {
+        this.cleanupJobMutexIfTerminalStatus(jobId, terminalStatus);
+        await this.startQueuedJobsSafely(jobHandlerName);
         return;
       }
 
@@ -967,17 +977,24 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     afLogger.error(`Error while processing tasks of job ${jobId}: ${errorMessage}`);
 
     try {
-      const currentStatus = await this.getLastJobStatus(jobId);
-      if (TERMINAL_JOB_STATUSES.includes(currentStatus as JobStatus)) {
+      // recording the error suspends, so the status is re-read under the same mutex as the completion
+      const finishedAt = await this.getJobTasksMutex(jobId).runExclusive(async () => {
+        const currentStatus = await this.getLastJobStatus(jobId);
+        if (TERMINAL_JOB_STATUSES.includes(currentStatus as JobStatus)) {
+          return null;
+        }
+
+        await this.setJobStateField(jobId, 'error', errorMessage);
+        const at = new Date().toISOString();
+        await this.adminforth.resource(this.getResourceId()).update(jobId, {
+          [this.options.statusField]: 'DONE_WITH_ERRORS',
+          [this.options.finishedAtField]: at,
+        });
+        return at;
+      });
+      if (!finishedAt) {
         return;
       }
-
-      await this.setJobStateField(jobId, 'error', errorMessage);
-      const finishedAt = new Date().toISOString();
-      await this.adminforth.resource(this.getResourceId()).update(jobId, {
-        [this.options.statusField]: 'DONE_WITH_ERRORS',
-        [this.options.finishedAtField]: finishedAt,
-      });
       this.publishJobUpdate({ jobId, status: 'DONE_WITH_ERRORS', finishedAt, error: errorMessage });
       this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
       await this.startQueuedJobsSafely(jobHandlerName);
@@ -1216,23 +1233,29 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           // startNextQueuedJob reads a QUEUED job and promotes it under the same queue mutex, so the status is
           // checked and CANCELLED is written under it too, otherwise a promotion could overwrite CANCELLED with IN_PROGRESS
           const cancelResult = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
-            const oldStatus = (await this.getJobById(jobId))[this.options.statusField];
-            if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
-              return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
-            }
-            await this.adminforth.resource(this.getResourceId()).update(jobId, {
-              [this.options.statusField]: 'CANCELLED',
-              [this.options.finishedAtField]: (new Date()).toISOString(),
+            // completion and failure write the final status under this mutex, so cancellation takes it
+            // too; always queue before tasks, since the failure handler runs under the queue mutex
+            return this.getJobTasksMutex(String(jobId)).runExclusive(async () => {
+              const oldStatus = (await this.getJobById(jobId))[this.options.statusField];
+              if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
+                return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
+              }
+              await this.adminforth.resource(this.getResourceId()).update(jobId, {
+                [this.options.statusField]: 'CANCELLED',
+                [this.options.finishedAtField]: (new Date()).toISOString(),
+              });
+              this.publishJobUpdate({
+                jobId,
+                status: 'CANCELLED',
+              });
+              return { ok: true };
             });
-            this.publishJobUpdate({
-              jobId,
-              status: 'CANCELLED',
-            });
-            return { ok: true };
           });
           if (!cancelResult.ok) {
             return cancelResult;
           }
+          // a job cancelled before it ran has no processing left to drop its mutex
+          this.cleanupJobMutexIfTerminalStatus(String(jobId), 'CANCELLED');
           // a cancelled job frees its concurrency slot, so the next queued job of the same handler can start;
           // runs after the queue mutex is released because startNextQueuedJob takes it again and it is not reentrant
           await this.startQueuedJobsSafely(jobHandlerName);
