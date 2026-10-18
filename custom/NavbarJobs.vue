@@ -1,76 +1,51 @@
 <template>
-  <div class="relative" ref="dropdownRef">
-    <button
-      type="button"
-      class="relative flex h-10 cursor-pointer items-center gap-2 overflow-hidden rounded-full border pl-3.5 transition-colors"
-      :class="isAlLeastOneJobRunning
-        ? 'pr-2 bg-lightSecondary border-lightPrimary/45 ring-[3px] ring-lightPrimary/10 text-lightPrimary dark:bg-darkSecondary dark:border-darkPrimary/45 dark:ring-darkPrimary/10 dark:text-darkPrimary'
-        : 'pr-4 shadow-sm bg-lightSecondary border-lightSecondaryContrast/15 text-lightNavbarIcons hover:bg-lightSecondaryDarken dark:bg-darkSecondary dark:border-darkSecondaryContrast/15 dark:text-darkNavbarIcons dark:hover:bg-darkSecondaryLighten'"
-      :aria-expanded="isDropdownOpen"
-      :aria-label="t('Jobs')"
-      @click="toggleJobsDropdown"
-    >
-      <Tooltip>
-        <IconCog6Tooth
-          class="w-5 h-5"
-          :class="{ 'animate-[spin_3s_linear_infinite] motion-reduce:animate-none': isAlLeastOneJobRunning }"
-        />
-        <template #tooltip>
-          {{ isAlLeastOneJobRunning ? t('Jobs in progress') : t('All jobs completed') }}
+  <!-- the list stays mounted while closed, so a job popup opened from it outlives the dropdown -->
+  <DropdownMenu
+    v-model:open="isDropdownOpen"
+    placement="bottom-end"
+    keepMounted
+    teleportToBody
+    contentClass="af-background-jobs-dropdown w-80"
+  >
+    <template #trigger>
+      <Button
+        type="button"
+        variant="secondary"
+        class="relative overflow-hidden"
+        :class="{ 'bg-lightButtonGroupActiveBackground hover:bg-lightButtonGroupActiveBackground dark:bg-darkButtonGroupActiveBackground dark:hover:bg-darkButtonGroupActiveBackground': isDropdownOpen }"
+        :aria-expanded="isDropdownOpen"
+      >
+        <template v-if="isAlLeastOneJobRunning">
+          <!-- the label already tells the state, the spinner's own "Loading..." would be read before it -->
+          <Spinner class="w-4 h-4" aria-hidden="true" />
+          <span class="tabular-nums">{{ t('{count} running', { count: jobsCount }) }}</span>
+          <span
+            class="absolute bottom-0 left-0 h-0.5 bg-lightPrimary transition-[width] duration-500 dark:bg-darkPrimary"
+            :style="{ width: `${overallProgress}%` }"
+          />
         </template>
-      </Tooltip>
-      <span
-        class="jobs-label text-sm font-semibold text-lightPrimary dark:text-darkPrimary"
-        :class="{ 'jobs-label--pulse': isAlLeastOneJobRunning }"
-      >
-        {{ t('Jobs') }}
-      </span>
-      <span
-        v-if="isAlLeastOneJobRunning"
-        class="flex h-6 min-w-6 items-center justify-center rounded-full px-2 text-xs font-bold tabular-nums bg-lightPrimary/15 dark:bg-darkPrimary/20"
-      >
-        {{ jobsCount }}
-      </span>
-      <span
-        v-if="isAlLeastOneJobRunning"
-        class="absolute bottom-0 left-0 h-0.5 bg-lightPrimary transition-[width] duration-500 dark:bg-darkPrimary"
-        :style="{ width: `${overallProgress}%` }"
-      />
-    </button>
-    <Transition
-      enter-active-class="transition ease-out duration-200"
-      enter-from-class="opacity-0 scale-95"
-      enter-to-class="opacity-100 scale-100"
-      leave-active-class="transition ease-in duration-150"
-      leave-from-class="opacity-100 scale-100"
-      leave-to-class="opacity-0 scale-95"
-    >
-      <div v-show="isDropdownOpen" class="absolute right-0 top-14 md:top-12 rounded z-10 overflow-y-auto max-h-96 ">
-        <JobsList 
-          :closeDropdown="() => isDropdownOpen = false"
-          :jobs="jobs" 
-          :meta="meta"
-        />
-      </div>
-    </Transition>
-  </div>
-
-  
+        <template v-else>
+          <IconLayers class="w-4 h-4" />
+          {{ t('Jobs') }}
+        </template>
+      </Button>
+    </template>
+    <JobsList :jobs="jobs" :meta="meta" />
+  </DropdownMenu>
 </template>
 
 
 
 <script setup lang="ts">
   import type { AdminUser } from 'adminforth';
-  import { onMounted, onUnmounted, ref, computed } from 'vue';
-  import { Tooltip } from '@/afcl';
-  import { IconCog6Tooth } from '@iconify-prerendered/vue-heroicons';
+  import { onMounted, onUnmounted, ref, computed, watch } from 'vue';
+  import { Button, DropdownMenu, Spinner } from '@/afcl';
+  import { IconLayers } from '@iconify-prerendered/vue-lucide';
   import { useI18n } from 'vue-i18n';
   import JobsList from './JobsList.vue';
   import type { IJob } from './utils';
   import { callAdminForthApi } from '@/utils';
   import websocket from '@/websocket';
-  import { onClickOutside } from '@vueuse/core'
   import { useAdminforth } from '@/adminforth';
 
   const { t } = useI18n();
@@ -85,11 +60,12 @@
 
   const isDropdownOpen = ref(false);
   const jobs = ref<IJob[]>([]);
-  const dropdownRef = ref<HTMLElement | null>(null);
   let unsubscribeJobUpdates: (() => void) | undefined;
 
-  onClickOutside(dropdownRef, () => {
-    isDropdownOpen.value = false;
+  watch(isDropdownOpen, (open) => {
+    if (open) {
+      loadJobs();
+    }
   });
 
   // queued jobs are pending work as well, so they are shown in the badge together with the running ones
@@ -129,17 +105,6 @@
       console.error('Error fetching jobs:', error);
     }
   }
-
-  async function toggleJobsDropdown() {
-    if (isDropdownOpen.value) {
-      isDropdownOpen.value = false;
-      return;
-    }
-    await loadJobs();
-    isDropdownOpen.value = true;
-  }
-
-
 
   onMounted(async () => {
     unsubscribeJobUpdates = websocket.subscribe('/background-jobs-job-update', (data) => {
@@ -188,39 +153,3 @@
   });
 
 </script>
-
-
-<style scoped lang="scss">
-// the label always glows with the theme primary color, and pulses while jobs are running
-.jobs-label {
-  --jobs-glow: theme('colors.lightPrimary');
-  text-shadow: 0 0 10px color-mix(in srgb, var(--jobs-glow) 55%, transparent);
-}
-
-.dark .jobs-label {
-  --jobs-glow: theme('colors.darkPrimary');
-}
-
-.jobs-label--pulse {
-  animation: jobs-glow 1.8s ease-in-out infinite;
-}
-
-@keyframes jobs-glow {
-  0%, 100% {
-    text-shadow:
-      0 0 4px color-mix(in srgb, var(--jobs-glow) 40%, transparent),
-      0 0 10px color-mix(in srgb, var(--jobs-glow) 25%, transparent);
-  }
-  50% {
-    text-shadow:
-      0 0 6px color-mix(in srgb, var(--jobs-glow) 90%, transparent),
-      0 0 18px color-mix(in srgb, var(--jobs-glow) 65%, transparent);
-  }
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .jobs-label--pulse {
-    animation: none;
-  }
-}
-</style>

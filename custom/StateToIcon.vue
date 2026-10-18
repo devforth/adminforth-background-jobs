@@ -1,68 +1,49 @@
 <template>
-  <Tooltip v-if="job?.status === 'QUEUED' || status === 'QUEUED'">
-    <IconClockOutline class="w-6 h-6 ml-2 text-gray-400" />
-    <template #tooltip>
-      {{ t('Queued') }}
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="job?.status === 'IN_PROGRESS' || status === 'IN_PROGRESS'">
-    <Spinner class="w-5 h-5 ml-2" />
-    <template #tooltip>
-      {{ t('In progress') }}
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="job?.status === 'DONE' || status === 'DONE'">
-    <IconCheckCircleOutline  class="w-6 h-6 ml-2 text-green-500" />
-    <template #tooltip>
-      {{ t('Done') }}
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="job?.status === 'CANCELLED' || status === 'CANCELLED'">
-    <IconCloseCircleOutline class="w-6 h-6 ml-2 text-red-500" />
-    <template #tooltip>
-      {{ t('Cancelled') }}
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="job?.status === 'DONE_WITH_ERRORS' || status === 'DONE_WITH_ERRORS'">
-    <IconExclamationCircleOutline class="w-6 h-6 ml-2 text-yellow-500" />
-    <template #tooltip>
-      {{ t('Done with errors') }}
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="status === 'FAILED'">
-    <IconCloseCircleOutline class="w-6 h-6 ml-2 text-red-500" />
+  <Tooltip v-if="state">
+    <span class="af-background-job-state flex items-center" :class="state.class" role="img" :aria-label="state.label">
+      <Spinner v-if="currentStatus === 'IN_PROGRESS'" class="w-4 h-4" aria-hidden="true" />
+      <component v-else :is="state.icon" class="w-4 h-4" aria-hidden="true" />
+    </span>
     <template #tooltip>
       <p class="max-w-64 break-all">
-        {{ t('Failed') }}<template v-if="error">: {{ error }}</template>
+        {{ state.label }}<template v-if="currentStatus === 'FAILED' && error">: {{ error }}</template>
       </p>
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="status === 'SCHEDULED'">
-    <IconClockOutline class="w-6 h-6 ml-2 text-blue-500" />
-    <template #tooltip>
-      {{ t('Scheduled') }}
-    </template>
-  </Tooltip>
-  <Tooltip v-else-if="status === 'DELETED'">
-    <IconTrashBinOutline class="w-6 h-6 ml-2 text-gray-400" />
-    <template #tooltip>
-      {{ t('Deleted') }}
     </template>
   </Tooltip>
 </template>
 
 
 <script setup lang="ts">
+  import type { Component } from 'vue';
+  import { computed } from 'vue';
   import type { IJob } from './utils';
-  import { IconCheckCircleOutline, IconCloseCircleOutline, IconExclamationCircleOutline, IconClockOutline, IconTrashBinOutline } from '@iconify-prerendered/vue-flowbite';
+  import { IconBan, IconCircleAlert, IconCircleCheck, IconCircleX, IconClock, IconTrash2 } from '@iconify-prerendered/vue-lucide';
   import { Spinner, Tooltip } from '@/afcl';
   import { useI18n } from 'vue-i18n';
+
+  type Status = 'SCHEDULED' | 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS' | 'DELETED';
 
   const { t } = useI18n();
 
   const props = defineProps<{
     job?: IJob;
-    status?: 'SCHEDULED' | 'QUEUED' | 'IN_PROGRESS' | 'DONE' | 'FAILED' | 'CANCELLED' | 'DONE_WITH_ERRORS' | 'DELETED';
+    status?: Status;
     error?: string;
   }>();
+
+  const MUTED = 'text-lightInputIconColor dark:text-darkInputIconColor';
+
+  const states = computed<Record<Status, { label: string; class: string; icon?: Component }>>(() => ({
+    SCHEDULED: { label: t('Scheduled'), icon: IconClock, class: 'text-lightPrimary dark:text-darkPrimary' },
+    QUEUED: { label: t('Queued'), icon: IconClock, class: MUTED },
+    IN_PROGRESS: { label: t('In progress'), class: '' },
+    DONE: { label: t('Done'), icon: IconCircleCheck, class: 'text-lightSuccess dark:text-darkSuccess' },
+    DONE_WITH_ERRORS: { label: t('Done with errors'), icon: IconCircleAlert, class: 'text-lightWarning dark:text-darkWarning' },
+    FAILED: { label: t('Failed'), icon: IconCircleX, class: 'text-lightDanger dark:text-darkDanger' },
+    CANCELLED: { label: t('Cancelled'), icon: IconBan, class: MUTED },
+    DELETED: { label: t('Deleted'), icon: IconTrash2, class: MUTED },
+  }));
+
+  const currentStatus = computed(() => props.job?.status ?? props.status);
+  const state = computed(() => currentStatus.value && states.value[currentStatus.value]);
 </script>

@@ -3,8 +3,7 @@
   <div style="display:none">
     <Modal 
       ref="dialogRef" 
-      removeFromDomOnClose 
-      class="p-4"
+      removeFromDomOnClose
       :beforeCloseFunction="() => { jobStore.clearCurrentJob(); jobStore.setIsOpened(false); }"
     >
       <JobInfoPopup
