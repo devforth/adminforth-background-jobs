@@ -1203,6 +1203,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     server.endpoint({
       method: 'POST',
       path: `/plugin/${this.pluginInstanceId}/cancel-job`,
+      agent: { requiresHumanApproval: true },
       request_schema: jobIdBodySchema,
       handler: async ({ body }) => {
         const data = body as z.infer<typeof jobIdBodySchema>;
