@@ -105,7 +105,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   }
 
   private getResourcePk(): string {
-    const resourcePk = this.resourceConfig.columns.find(c => c.primaryKey)?.name;
+    const resourcePk = this.resourceConfig.columns.find(c => c.primaryKey)!.name;
     return resourcePk;
   }
 
@@ -215,7 +215,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     await levelDb.put(taskId, JSON.stringify({ state, status }));
   }
 
-  private async getLevelDbTaskStateField(levelDb: Level, taskId: string): Promise<Record<string, any>> {
+  private async getLevelDbTaskStateField(levelDb: Level, taskId: string): Promise<Record<string, any> | null> {
     //get record from level db with task id as key and return the value of the key in the state
     this.touchLevelDb(levelDb);
     const state = await levelDb.get(taskId);
@@ -226,7 +226,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     return Promise.resolve(null);
   }
 
-  private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<TaskStatus> {
+  private async getLevelDbTaskStatusField(levelDb: Level, taskId: string): Promise<TaskStatus | null> {
     this.touchLevelDb(levelDb);
     const state = await levelDb.get(taskId);
     if (state) {
@@ -558,7 +558,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   private async listJobsByStatus(
     jobHandlerName: string,
     status: JobStatus,
-    limit: number | null = null,
+    limit?: number,
   ): Promise<Record<string, any>[]> {
     return this.adminforth.resource(this.getResourceId()).list(
       Filters.AND(
@@ -718,7 +718,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       const status = await this.getLevelDbTaskStatusField(levelDb, taskIndex.toString());
       if (status === 'IN_PROGRESS' || status === 'SCHEDULED') {
         const state = await this.getLevelDbTaskStateField(levelDb, taskIndex.toString());
-        unfinishedTasks.push({ state, taskIndex });
+        unfinishedTasks.push({ state: state!, taskIndex });
       }
     }
     return unfinishedTasks;
@@ -779,7 +779,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         return;
       }
       const getState = async () => {
-        return await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString());
+        return (await this.getLevelDbTaskStateField(jobLevelDb, taskIndex.toString()))!;
       }
       const setTaskStateField: setStateFieldParams = async (fieldNameOrState: string | Record<string, any>, value?: any) => {
         if (typeof fieldNameOrState === 'string') {
@@ -823,7 +823,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         //Set task status to completed in level db
         await this.setLevelDbTaskStatusField(jobLevelDb, taskIndex.toString(), 'DONE');
         this.adminforth.websocket.publish(`/background-jobs-task-update/${jobId}`, { taskIndex, status: "DONE" });
-      } catch (error) {
+      } catch (error: any) {
         const errorMessage = error?.message || 'Unknown error';
         afLogger.error(`Error in handling task ${taskIndex} of job ${jobId}: ${errorMessage}`, );
         await this.setJobStateField(jobId, 'error', errorMessage);
@@ -1217,7 +1217,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
           // startNextQueuedJob reads a QUEUED job and promotes it under the same queue mutex, so the status is
           // checked and CANCELLED is written under it too, otherwise a promotion could overwrite CANCELLED with IN_PROGRESS
           const cancelResult = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
-            const oldStatus = (await this.getJobById(jobId))[this.options.statusField];
+            const oldStatus = (await this.getJobById(jobId))![this.options.statusField];
             if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
               return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
             }
