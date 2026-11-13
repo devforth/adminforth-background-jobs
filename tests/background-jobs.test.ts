@@ -1053,6 +1053,8 @@ describe('BackgroundJobsPlugin queued jobs', () => {
     expect(resource.records.get(queuedJobId)).toMatchObject({ status: 'CANCELLED' });
     expect(resource.records.get(runningJobId)).toMatchObject({ status: 'IN_PROGRESS' });
     expect(startedTasks).toEqual(['running']);
+    // the job never runs, so the cancellation drops the job tasks mutex it took itself
+    expect((plugin as any).jobTasksMutexes[queuedJobId]).toBeUndefined();
   });
 
   it('cancels a queued job after its in-flight promotion instead of letting the promotion overwrite CANCELLED', async () => {
@@ -1523,6 +1525,8 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
         body: { jobId: 'job-terminal' },
       }),
     ).resolves.toEqual({ message: 'Cannot cancel a job with status DONE.', ok: false });
+    // a finished job keeps no job tasks mutex, the rejected cancel created and dropped its own
+    expect((plugin as any).jobTasksMutexes['job-terminal']).toBeUndefined();
 
     await expect(
       endpoints.get('POST /plugin/test-plugin/get-tasks')({
@@ -1622,5 +1626,148 @@ describe('BackgroundJobsPlugin REST endpoint handlers', () => {
         body: { jobId: 'job-without-tasks', limit: 10, offset: 0 },
       }),
     ).resolves.toEqual({ data: { tasks: [], total: 0 }, ok: true });
+  });
+});
+
+describe('BackgroundJobsPlugin cancellation racing with the final status write', () => {
+  beforeEach(() => {
+    levelMock.Level.stores.clear();
+  });
+
+  function setupCancelJob(plugin: BackgroundJobsPlugin) {
+    const endpoints = new Map<string, any>();
+    plugin.setupEndpoints({
+      endpoint: vi.fn((definition: any) => {
+        endpoints.set(`${definition.method} ${definition.path}`, definition.handler);
+      }),
+    } as any);
+    return (jobId: string) => endpoints.get('POST /plugin/test-plugin/cancel-job')({ adminUser: { pk: 'user-1' }, body: { jobId } });
+  }
+
+  function publishedJobStatuses(adminforth: ReturnType<typeof createMockAdminforth>, jobId: string) {
+    return adminforth.websocket.publish.mock.calls
+      .filter(([path, payload]: any[]) => path === '/background-jobs-job-update' && payload.jobId === jobId && payload.status)
+      .map(([, payload]: any[]) => payload.status);
+  }
+
+  it('keeps CANCELLED when it commits after the completion read the status and before it writes', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const cancelJob = setupCancelJob(plugin);
+    const onAllTasksDone = vi.fn();
+    let finishing = false;
+    plugin.registerTaskHandler({
+      beforeJobFinish: () => { finishing = true; },
+      handler: async () => {},
+      jobHandlerName: 'finish-race',
+      onAllTasksDone,
+      parallelLimit: 1,
+    });
+
+    // holds the completion where it asks for the job tasks mutex to write the final status
+    const finishLockRequested = createDeferred();
+    const finishLockGate = createDeferred();
+    const jobTasksMutex = (plugin as any).getJobTasksMutex.bind(plugin);
+    vi.spyOn(plugin as any, 'getJobTasksMutex').mockImplementation((id: any) => {
+      const mutex = jobTasksMutex(id);
+      if (!finishing) {
+        return mutex;
+      }
+      finishing = false;
+      return {
+        runExclusive: async (callback: any) => {
+          finishLockRequested.resolve();
+          await finishLockGate.promise;
+          return mutex.runExclusive(callback);
+        },
+      };
+    });
+    const startQueuedJobsSafely = vi.spyOn(plugin as any, 'startQueuedJobsSafely');
+
+    const jobId = await plugin.startNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'only' } }], 'finish-race');
+    await finishLockRequested.promise;
+
+    await expect(cancelJob(jobId)).resolves.toEqual({ ok: true });
+    const startQueuedCallsBeforeFinish = startQueuedJobsSafely.mock.calls.length;
+    finishLockGate.resolve();
+    // the completion ends by trying to start queued jobs, whether it finished the job or found it cancelled
+    await eventually(() => expect(startQueuedJobsSafely.mock.calls.length).toBeGreaterThan(startQueuedCallsBeforeFinish));
+
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'CANCELLED' });
+    expect(publishedJobStatuses(adminforth, jobId)).toEqual(['IN_PROGRESS', 'CANCELLED']);
+    expect(onAllTasksDone).not.toHaveBeenCalled();
+  });
+
+  it('makes a cancellation wait for the final status write instead of landing inside it', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const cancelJob = setupCancelJob(plugin);
+    plugin.registerTaskHandler({ handler: async () => {}, jobHandlerName: 'write-lock', parallelLimit: 1 });
+
+    // stalls the completion while it holds the job tasks mutex for the final status write
+    const insideWrite = createDeferred();
+    const writeGate = createDeferred();
+    const allTasksDoneStatus = (plugin as any).getAllTasksDoneStatus.bind(plugin);
+    vi.spyOn(plugin as any, 'getAllTasksDoneStatus').mockImplementation(async (...args: any[]) => {
+      insideWrite.resolve();
+      await writeGate.promise;
+      return allTasksDoneStatus(...args);
+    });
+
+    const jobId = await plugin.startNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'only' } }], 'write-lock');
+    await insideWrite.promise;
+
+    let cancelSettled = false;
+    const cancellation = cancelJob(jobId).then((result: any) => {
+      cancelSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(cancelSettled).toBe(false);
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'IN_PROGRESS' });
+
+    writeGate.resolve();
+    await expect(cancellation).resolves.toEqual({ ok: false, message: 'Cannot cancel a job with status DONE.' });
+    expect(resource.records.get(jobId)).toMatchObject({ status: 'DONE' });
+    expect(publishedJobStatuses(adminforth, jobId)).toEqual(['IN_PROGRESS', 'DONE']);
+  });
+
+  it('makes a cancellation wait for the failure path instead of being overwritten by DONE_WITH_ERRORS', async () => {
+    const { adminforth, plugin, resource } = await createHarness();
+    const cancelJob = setupCancelJob(plugin);
+    plugin.registerTaskHandler({
+      beforeJobFinish: async () => {
+        throw new Error('finish callback exploded');
+      },
+      handler: async () => {},
+      jobHandlerName: 'failure-race',
+      parallelLimit: 1,
+    });
+
+    // stalls the failure path after its status check, while it records the error
+    const recordingError = createDeferred();
+    const errorGate = createDeferred();
+    const setJobStateField = plugin.setJobStateField.bind(plugin);
+    vi.spyOn(plugin, 'setJobStateField').mockImplementation(async (jobId, key, value) => {
+      if (key === 'error') {
+        recordingError.resolve();
+        await errorGate.promise;
+      }
+      return setJobStateField(jobId, key, value);
+    });
+
+    const jobId = await plugin.startNewJob('Sync', { pk: 'user-1' } as any, [{ state: { name: 'only' } }], 'failure-race');
+    await recordingError.promise;
+
+    let cancelSettled = false;
+    const cancellation = cancelJob(jobId).then((result: any) => {
+      cancelSettled = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(cancelSettled).toBe(false);
+
+    errorGate.resolve();
+    await expect(cancellation).resolves.toEqual({ ok: false, message: 'Cannot cancel a job with status DONE_WITH_ERRORS.' });
+    expect(resource.records.get(jobId)).toMatchObject({ state: { error: 'finish callback exploded' }, status: 'DONE_WITH_ERRORS' });
+    expect(publishedJobStatuses(adminforth, jobId)).toEqual(['IN_PROGRESS', 'DONE_WITH_ERRORS']);
   });
 });
