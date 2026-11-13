@@ -545,6 +545,7 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
   /**
    * Taken by addNewTasksToExistingJob and by the last unfinished-task scan with the terminal status write of a job,
    * so a task is either added before that scan and processed, or rejected because the job is already finished.
+   * The failure path and cancel-job take it too, so no terminal status write lands between another one's check and write.
    */
   private getJobTasksMutex(jobId: string): Mutex {
     let mutex = this.jobTasksMutexes[jobId];
@@ -897,16 +898,13 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       const nextFinishAttemptNumber = finishAttemptNumber + 1;
       await this.triggerBeforeJobFinish(beforeJobFinish, jobLevelDb, jobId, nextFinishAttemptNumber);
 
-      const currentJobStatusAfterFinishCallback = await this.getLastJobStatus(jobId);
-      if (currentJobStatusAfterFinishCallback === 'CANCELLED') {
-        this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
-        await this.startQueuedJobsSafely(jobHandlerName);
-        return;
-      }
-
       // the last scan and the terminal status write hold the job tasks mutex, so addNewTasksToExistingJob can not
       // store a task between them which nobody would process
       const { unfinishedTasksAfterFinishCallback, finalStatus } = await this.getJobTasksMutex(jobId).runExclusive(async () => {
+        // checked under the mutex because cancel-job writes CANCELLED under it too
+        if (TERMINAL_JOB_STATUSES.includes(await this.getLastJobStatus(jobId) as JobStatus)) {
+          return { unfinishedTasksAfterFinishCallback: [], finalStatus: null };
+        }
         const unfinishedTasksAfterFinishCallback = await this.getUnfinishedTasksFromLevelDb(jobLevelDb);
         if (unfinishedTasksAfterFinishCallback.length > 0) {
           return { unfinishedTasksAfterFinishCallback, finalStatus: null };
@@ -922,6 +920,12 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
       if (unfinishedTasksAfterFinishCallback.length > 0) {
         const tasksToReprocess = await this.buildTasksToReprocess(jobLevelDb, unfinishedTasksAfterFinishCallback);
         await this.runProcessingTasks(tasksToReprocess, jobLevelDb, jobId, jobRunContext, nextFinishAttemptNumber);
+        return;
+      }
+      // the job was cancelled before the check above, so its completion is neither stored nor announced
+      if (!finalStatus) {
+        this.cleanupJobMutexIfTerminalStatus(jobId, 'CANCELLED');
+        await this.startQueuedJobsSafely(jobHandlerName);
         return;
       }
 
@@ -967,17 +971,26 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
     afLogger.error(`Error while processing tasks of job ${jobId}: ${errorMessage}`);
 
     try {
-      const currentStatus = await this.getLastJobStatus(jobId);
-      if (TERMINAL_JOB_STATUSES.includes(currentStatus as JobStatus)) {
+      // under the job tasks mutex, so cancel-job can not store CANCELLED between the check and the write
+      const finishedAt = await this.getJobTasksMutex(jobId).runExclusive(async () => {
+        const currentStatus = await this.getLastJobStatus(jobId);
+        if (TERMINAL_JOB_STATUSES.includes(currentStatus as JobStatus)) {
+          return null;
+        }
+
+        await this.setJobStateField(jobId, 'error', errorMessage);
+        const finishedAt = new Date().toISOString();
+        await this.adminforth.resource(this.getResourceId()).update(jobId, {
+          [this.options.statusField]: 'DONE_WITH_ERRORS',
+          [this.options.finishedAtField]: finishedAt,
+        });
+        return finishedAt;
+      });
+      if (!finishedAt) {
+        // finished before, its mutex is gone and was created again above
+        this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
         return;
       }
-
-      await this.setJobStateField(jobId, 'error', errorMessage);
-      const finishedAt = new Date().toISOString();
-      await this.adminforth.resource(this.getResourceId()).update(jobId, {
-        [this.options.statusField]: 'DONE_WITH_ERRORS',
-        [this.options.finishedAtField]: finishedAt,
-      });
       this.publishJobUpdate({ jobId, status: 'DONE_WITH_ERRORS', finishedAt, error: errorMessage });
       this.cleanupJobMutexIfTerminalStatus(jobId, 'DONE_WITH_ERRORS');
       await this.startQueuedJobsSafely(jobHandlerName);
@@ -1215,8 +1228,10 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
         const jobHandlerName = currentJob[this.options.jobHandlerField];
         try {
           // startNextQueuedJob reads a QUEUED job and promotes it under the same queue mutex, so the status is
-          // checked and CANCELLED is written under it too, otherwise a promotion could overwrite CANCELLED with IN_PROGRESS
-          const cancelResult = await this.getQueueMutex(jobHandlerName).runExclusive(async () => {
+          // checked and CANCELLED is written under it too, otherwise a promotion could overwrite CANCELLED with IN_PROGRESS;
+          // the completion and the failure path check and write the final status under the job tasks mutex, so it is held
+          // too, and nothing takes the queue mutex while holding a job tasks mutex, so this order can not deadlock
+          const cancelResult = await this.getQueueMutex(jobHandlerName).runExclusive(() => this.getJobTasksMutex(String(jobId)).runExclusive(async () => {
             const oldStatus = (await this.getJobById(jobId))![this.options.statusField];
             if (TERMINAL_JOB_STATUSES.includes(oldStatus)) {
               return { ok: false, message: `Cannot cancel a job with status ${oldStatus}.` };
@@ -1230,7 +1245,9 @@ export default class BackgroundJobsPlugin extends AdminForthPlugin {
               status: 'CANCELLED',
             });
             return { ok: true };
-          });
+          }));
+          // the job is finished now, cancelled just now or earlier, and nothing else would drop the mutex taken above
+          this.cleanupJobMutexIfTerminalStatus(String(jobId), 'CANCELLED');
           if (!cancelResult.ok) {
             return cancelResult;
           }
